@@ -12,3 +12,4 @@ build/
 benchmark/shards/
 benchmark/output/*.csv
 benchmark/output/*.json
+RELEASE_NOTES_*.md
