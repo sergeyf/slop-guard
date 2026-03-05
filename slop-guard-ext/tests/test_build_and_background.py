@@ -94,6 +94,24 @@ def test_build_outputs_drop_remote_font_dependencies(build_extensions):
         "fonts.gstatic.com"
         not in firefox_manifest["content_security_policy"]["extension_pages"]
     )
+    assert "blob:" not in chrome_manifest["content_security_policy"]["extension_pages"]
+    assert "blob:" not in firefox_manifest["content_security_policy"]["extension_pages"]
+    assert (
+        "cdn.jsdelivr.net"
+        not in chrome_manifest["content_security_policy"]["extension_pages"]
+    )
+    assert (
+        "files.pythonhosted.org"
+        not in chrome_manifest["content_security_policy"]["extension_pages"]
+    )
+    assert (
+        "cdn.jsdelivr.net"
+        not in firefox_manifest["content_security_policy"]["extension_pages"]
+    )
+    assert (
+        "files.pythonhosted.org"
+        not in firefox_manifest["content_security_policy"]["extension_pages"]
+    )
     assert "alarms" in chrome_manifest["permissions"]
     assert "alarms" in firefox_manifest["permissions"]
 

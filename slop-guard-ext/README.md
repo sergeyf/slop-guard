@@ -1,7 +1,7 @@
 # Slop Guard Browser Extension
 
 Score any text 0-100 for formulaic AI writing patterns directly in your browser.
-The extension runs [slop-guard](https://github.com/eric-tramel/slop-guard) through Pyodide (Python in WebAssembly). There is no server and no API traffic. Chrome downloads Pyodide on first use; Firefox bundles it locally.
+The extension runs [slop-guard](https://github.com/eric-tramel/slop-guard) through Pyodide (Python in WebAssembly). There is no server and no API traffic. Both browser builds bundle Pyodide locally.
 
 ## Quick start
 
@@ -87,8 +87,7 @@ User input -> popup.js -> background.js runtime bridge -> Pyodide -> slop_guard.
 - `build.py` creates browser-specific builds in `dist/chrome/` and `dist/firefox/`
 - `background.js` owns the long-lived Pyodide runtime and context-menu integration
 - `popup.js` manages the UI, capture helpers, persistence, and rendering
-- Firefox bundles Pyodide locally for AMO
-- Chrome uses jsDelivr for Pyodide assets on first launch
+- Both Chrome and Firefox bundle Pyodide locally
 
 ## File structure
 

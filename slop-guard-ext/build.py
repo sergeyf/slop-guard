@@ -8,8 +8,7 @@ Produces dist/chrome/ and/or dist/firefox/ with the correct manifest
 and Pyodide configuration for each browser. Creates submission-ready
 ZIP files in dist/.
 
-Firefox builds bundle Pyodide locally (AMO forbids remote code).
-Chrome builds use the jsDelivr CDN.
+Both Chrome and Firefox bundle Pyodide locally.
 """
 
 import argparse
@@ -24,7 +23,7 @@ from pathlib import Path
 PYODIDE_VERSION = "0.27.7"
 PYODIDE_CDN = f"https://cdn.jsdelivr.net/pyodide/v{PYODIDE_VERSION}/full"
 
-# Minimal Pyodide files needed to run offline (Firefox/AMO).
+# Minimal Pyodide files needed to run offline.
 PYODIDE_ASSETS = [
     "pyodide.asm.js",
     "pyodide.asm.wasm",
@@ -164,7 +163,7 @@ def patch_popup_html(dest: Path) -> None:
 
 
 def build_chrome(dist: Path) -> Path:
-    """Build the Chrome/Edge/Brave extension."""
+    """Build the Chrome/Edge/Brave extension with locally bundled Pyodide."""
     dest = dist / "chrome"
     if dest.exists():
         shutil.rmtree(dest)
@@ -172,8 +171,10 @@ def build_chrome(dist: Path) -> Path:
     print("\n-- Building Chrome extension --")
     copy_shared(dest)
     shutil.copy2(EXT_DIR / "manifest.chrome.json", dest / "manifest.json")
-    write_config(dest, local_pyodide=False)
+    write_config(dest, local_pyodide=True)
     patch_popup_html(dest)
+    print("  Downloading Pyodide assets for local bundling ...")
+    download_pyodide_assets(dest / "pyodide")
 
     print(f"  Output: {dest}")
     return dest
@@ -193,19 +194,6 @@ def build_firefox(dist: Path) -> Path:
 
     print("  Downloading Pyodide assets for local bundling ...")
     download_pyodide_assets(dest / "pyodide")
-
-    manifest_path = dest / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    csp = manifest["content_security_policy"]["extension_pages"]
-    csp = csp.replace(
-        "connect-src 'self' https://cdn.jsdelivr.net https://files.pythonhosted.org",
-        "connect-src 'self'",
-    )
-    manifest["content_security_policy"]["extension_pages"] = csp
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
 
     print(f"  Output: {dest}")
     return dest

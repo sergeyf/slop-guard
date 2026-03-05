@@ -21,6 +21,6 @@
     "service_worker": "background.js"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://cdn.jsdelivr.net https://files.pythonhosted.org; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; default-src 'self'"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; default-src 'self'"
   }
 }
