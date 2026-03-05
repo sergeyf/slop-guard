@@ -39,6 +39,7 @@ Firefox:
 1. Open `about:debugging#/runtime/this-firefox`
 2. Click `Load Temporary Add-on`
 3. Select `dist/firefox/manifest.json`
+4. Firefox removes temporary add-ons on restart, so use the self-hosted signed flow below for a durable install
 
 ### Use it
 
@@ -120,6 +121,47 @@ That creates:
 - `dist/slop-guard-source.zip`
 
 The source archive is needed because `python_bundle.js` is generated code.
+
+## Firefox self-hosted auto-updates
+
+Temporary Firefox installs from `about:debugging` are for development only. For a durable install that survives restarts and auto-updates, you need:
+
+- a signed Firefox build
+- `browser_specific_settings.gecko.update_url` baked into that signed build before distribution
+- an HTTPS-hosted `updates.json`
+- an HTTPS-hosted signed `.xpi`
+
+Build the Firefox artifacts with the final public update URL:
+
+```bash
+uv run build.py --target firefox --firefox-update-base-url https://downloads.example.com/slop-guard/firefox/
+```
+
+That creates:
+
+- `dist/firefox/` - unpacked Firefox build with `update_url` embedded
+- `dist/slop-guard-firefox.zip` - AMO upload package
+- `dist/slop-guard-source.zip` - source archive for AMO review
+- `dist/firefox-selfhost/slop-guard-firefox.xpi` - unsigned XPI matching the built manifest
+- `dist/firefox-selfhost/updates.json` - update manifest pointing at `https://downloads.example.com/slop-guard/firefox/slop-guard-firefox.xpi`
+
+Sign the Firefox build through AMO's unlisted/self-distribution flow. Two workable paths:
+
+1. Upload `dist/slop-guard-firefox.zip` in the AMO Developer Hub as an unlisted add-on.
+2. Or sign the built directory directly:
+
+```bash
+npx web-ext sign --channel=unlisted --source-dir dist/firefox --artifacts-dir dist/firefox-signed
+```
+
+After Mozilla returns the signed XPI:
+
+1. Upload the signed file to the exact XPI URL referenced by `dist/firefox-selfhost/updates.json`.
+2. Upload `dist/firefox-selfhost/updates.json` to the exact `updates.json` URL embedded in the manifest.
+3. Serve the XPI over HTTPS with `Content-Type: application/x-xpinstall`.
+4. On each release, bump the extension `version`, rerun the same build command, sign again, and replace the hosted XPI plus `updates.json`.
+
+Firefox checks for extension updates roughly once per day. For local testing, temporarily lower `extensions.update.interval` in `about:config`.
 
 ## Score bands
 

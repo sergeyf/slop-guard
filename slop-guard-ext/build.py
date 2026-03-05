@@ -16,6 +16,7 @@ import json
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -41,6 +42,9 @@ SHARED_FILES = [
     "pyodide.js",
 ]
 SHARED_DIRS = ["icons"]
+FIREFOX_SELFHOST_DIR = "firefox-selfhost"
+FIREFOX_SELFHOST_XPI = "slop-guard-firefox.xpi"
+FIREFOX_UPDATES_MANIFEST = "updates.json"
 
 
 def default_repo_path() -> Path:
@@ -131,6 +135,40 @@ def copy_shared(dest: Path) -> None:
             shutil.copytree(src, dest / name, dirs_exist_ok=True)
 
 
+def read_json(path: Path) -> dict:
+    """Return a JSON object loaded from disk."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, payload: dict) -> None:
+    """Write a JSON object with a trailing newline."""
+    path.write_text(f"{json.dumps(payload, indent=2)}\n", encoding="utf-8")
+
+
+def normalize_https_base_url(value: str) -> str:
+    """Return a normalized HTTPS base URL for self-hosted Firefox updates."""
+    candidate = value.strip()
+    if not candidate:
+        raise ValueError("--firefox-update-base-url cannot be empty")
+
+    parsed = urllib.parse.urlparse(candidate)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("--firefox-update-base-url must be an https:// URL")
+    if parsed.query or parsed.fragment:
+        raise ValueError("--firefox-update-base-url cannot contain a query or fragment")
+
+    path = parsed.path.rstrip("/")
+    normalized_path = f"{path}/" if path else "/"
+    return urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, normalized_path, "", "", "")
+    )
+
+
+def build_https_url(base_url: str, leaf: str) -> str:
+    """Join a normalized HTTPS base URL with a single filename."""
+    return urllib.parse.urljoin(base_url, leaf)
+
+
 def write_config(dest: Path, *, local_pyodide: bool) -> None:
     """Write config.js with build-specific Pyodide settings."""
     if local_pyodide:
@@ -149,6 +187,23 @@ def write_config(dest: Path, *, local_pyodide: bool) -> None:
         f"const EXT_CONFIG = {json.dumps(config, indent=2)};\n"
     )
     (dest / "config.js").write_text(js, encoding="utf-8")
+
+
+def write_firefox_manifest(dest: Path, *, update_base_url: str | None = None) -> dict:
+    """Write Firefox's manifest.json, optionally embedding a self-hosted update URL."""
+    manifest = read_json(EXT_DIR / "manifest.firefox.json")
+    gecko = manifest.setdefault("browser_specific_settings", {}).setdefault("gecko", {})
+
+    if update_base_url is None:
+        gecko.pop("update_url", None)
+    else:
+        gecko["update_url"] = build_https_url(
+            normalize_https_base_url(update_base_url),
+            FIREFOX_UPDATES_MANIFEST,
+        )
+
+    write_json(dest / "manifest.json", manifest)
+    return manifest
 
 
 def patch_popup_html(dest: Path) -> None:
@@ -180,7 +235,7 @@ def build_chrome(dist: Path) -> Path:
     return dest
 
 
-def build_firefox(dist: Path) -> Path:
+def build_firefox(dist: Path, *, update_base_url: str | None = None) -> tuple[Path, dict]:
     """Build the Firefox extension with locally bundled Pyodide."""
     dest = dist / "firefox"
     if dest.exists():
@@ -188,7 +243,7 @@ def build_firefox(dist: Path) -> Path:
 
     print("\n-- Building Firefox extension --")
     copy_shared(dest)
-    shutil.copy2(EXT_DIR / "manifest.firefox.json", dest / "manifest.json")
+    manifest = write_firefox_manifest(dest, update_base_url=update_base_url)
     write_config(dest, local_pyodide=True)
     patch_popup_html(dest)
 
@@ -196,7 +251,7 @@ def build_firefox(dist: Path) -> Path:
     download_pyodide_assets(dest / "pyodide")
 
     print(f"  Output: {dest}")
-    return dest
+    return dest, manifest
 
 
 def create_zip(src_dir: Path, zip_path: Path) -> None:
@@ -207,6 +262,72 @@ def create_zip(src_dir: Path, zip_path: Path) -> None:
                 zf.write(path, path.relative_to(src_dir))
     size_mb = zip_path.stat().st_size / (1024 * 1024)
     print(f"  ZIP: {zip_path} ({size_mb:.1f} MB)")
+
+
+def firefox_selfhost_update_manifest(
+    manifest: dict,
+    *,
+    update_base_url: str,
+) -> dict:
+    """Return the Firefox updates.json payload for a self-hosted signed build."""
+    gecko = manifest.get("browser_specific_settings", {}).get("gecko", {})
+    addon_id = gecko.get("id")
+    version = manifest.get("version")
+    if not addon_id or not version:
+        raise ValueError("Firefox manifest must contain browser_specific_settings.gecko.id and version")
+
+    compat = {}
+    for key in ("strict_min_version", "strict_max_version"):
+        if gecko.get(key):
+            compat[key] = str(gecko[key])
+
+    update = {
+        "version": str(version),
+        "update_link": build_https_url(
+            normalize_https_base_url(update_base_url),
+            FIREFOX_SELFHOST_XPI,
+        ),
+    }
+    if compat:
+        update["applications"] = {"gecko": compat}
+
+    return {
+        "addons": {
+            str(addon_id): {
+                "updates": [update],
+            }
+        }
+    }
+
+
+def create_firefox_selfhost_artifacts(
+    dist: Path,
+    firefox_dir: Path,
+    *,
+    manifest: dict,
+    update_base_url: str,
+) -> Path:
+    """Create the unsigned XPI and updates.json for self-hosted Firefox updates."""
+    dest = dist / FIREFOX_SELFHOST_DIR
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+
+    xpi_path = dest / FIREFOX_SELFHOST_XPI
+    create_zip(firefox_dir, xpi_path)
+
+    updates_path = dest / FIREFOX_UPDATES_MANIFEST
+    write_json(
+        updates_path,
+        firefox_selfhost_update_manifest(
+            manifest,
+            update_base_url=update_base_url,
+        ),
+    )
+
+    print(f"  Self-hosted Firefox XPI: {xpi_path}")
+    print(f"  Firefox update manifest: {updates_path}")
+    return dest
 
 
 def create_source_archive(dist: Path, repo: Path) -> None:
@@ -272,6 +393,14 @@ def main() -> None:
         action="store_true",
         help="Skip creating ZIP archives",
     )
+    parser.add_argument(
+        "--firefox-update-base-url",
+        help=(
+            "HTTPS base URL for a self-hosted Firefox update channel. "
+            "When set, build.py embeds browser_specific_settings.gecko.update_url "
+            "into the built Firefox manifest and emits dist/firefox-selfhost/."
+        ),
+    )
     args = parser.parse_args()
 
     repo = args.repo.resolve()
@@ -280,12 +409,29 @@ def main() -> None:
     dist = EXT_DIR / "dist"
     dist.mkdir(exist_ok=True)
     targets = ["chrome", "firefox"] if args.target == "all" else [args.target]
+    firefox_update_base_url = None
+    if args.firefox_update_base_url is not None:
+        if "firefox" not in targets:
+            parser.error("--firefox-update-base-url requires --target firefox or --target all")
+        firefox_update_base_url = normalize_https_base_url(args.firefox_update_base_url)
+
+    firefox_selfhost_dir = None
 
     for target in targets:
         if target == "chrome":
             dest = build_chrome(dist)
         else:
-            dest = build_firefox(dist)
+            dest, firefox_manifest = build_firefox(
+                dist,
+                update_base_url=firefox_update_base_url,
+            )
+            if firefox_update_base_url is not None:
+                firefox_selfhost_dir = create_firefox_selfhost_artifacts(
+                    dist,
+                    dest,
+                    manifest=firefox_manifest,
+                    update_base_url=firefox_update_base_url,
+                )
 
         if not args.no_zip:
             create_zip(dest, dist / f"slop-guard-{target}.zip")
@@ -296,6 +442,15 @@ def main() -> None:
     print("\n-- Done --")
     print("Chrome:  Load dist/chrome/ as unpacked extension")
     print("Firefox: Load dist/firefox/manifest.json as temporary add-on")
+    if firefox_selfhost_dir is not None and firefox_update_base_url is not None:
+        print(
+            "Firefox: Upload a signed XPI to "
+            f"{build_https_url(firefox_update_base_url, FIREFOX_SELFHOST_XPI)}"
+        )
+        print(
+            "Firefox: Upload updates.json to "
+            f"{build_https_url(firefox_update_base_url, FIREFOX_UPDATES_MANIFEST)}"
+        )
     if not args.no_zip:
         print(
             "AMO:     Upload dist/slop-guard-firefox.zip + dist/slop-guard-source.zip"
