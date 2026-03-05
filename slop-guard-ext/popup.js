@@ -29,6 +29,7 @@ const analyzeBtn = document.getElementById("analyzeBtn");
 const grabSelBtn = document.getElementById("grabSelBtn");
 const grabPageBtn = document.getElementById("grabPageBtn");
 const clearBtn = document.getElementById("clearBtn");
+const copyInstructionsBtn = document.getElementById("copyInstructionsBtn");
 const captureNotice = document.getElementById("captureNotice");
 const scoreSection = document.getElementById("scoreSection");
 const scoreArc = document.getElementById("scoreArc");
@@ -47,6 +48,7 @@ let pyodide = null;
 let ready = false;
 let runtimeMode = "popup";
 let latestSource = null;
+let latestResult = null;
 
 function resolvePyodideIndexURL() {
   if (typeof EXT_CONFIG !== "undefined" && EXT_CONFIG.PYODIDE_INDEX_URL) {
@@ -130,6 +132,19 @@ function enableButtons() {
   analyzeBtn.disabled = false;
   grabSelBtn.disabled = false;
   grabPageBtn.disabled = false;
+}
+
+function getActionableAdvice(result) {
+  if (!result || !Array.isArray(result.advice)) {
+    return [];
+  }
+  return result.advice
+    .map((item) => String(item).trim())
+    .filter((item) => item.length > 0);
+}
+
+function updateCopyInstructionsState(result) {
+  copyInstructionsBtn.disabled = getActionableAdvice(result).length === 0;
 }
 
 function normalizeSource(source) {
@@ -381,7 +396,46 @@ async function setLastReport(payload) {
   }
 }
 
+function buildWriterInstructions(result) {
+  const actionableAdvice = getActionableAdvice(result);
+  if (actionableAdvice.length === 0) {
+    throw new Error("No writing issues available to copy.");
+  }
+
+  return [
+    "Please fix the following writing issues. Keep the edits to the mentioned issues only, and keep all the other content the same:",
+    "",
+    ...actionableAdvice.map((item, index) => `#${index + 1} ${item}`),
+  ].join("\n");
+}
+
+async function writeClipboardText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const scratch = document.createElement("textarea");
+  scratch.value = text;
+  scratch.setAttribute("readonly", "true");
+  scratch.style.position = "fixed";
+  scratch.style.opacity = "0";
+  scratch.style.pointerEvents = "none";
+  document.body.appendChild(scratch);
+  scratch.select();
+
+  try {
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("Clipboard copy command was rejected.");
+    }
+  } finally {
+    document.body.removeChild(scratch);
+  }
+}
+
 function renderResult(result) {
+  latestResult = result;
   const color = BAND_COLORS[result.band] || BAND_COLORS.moderate;
   const offset = CIRC * (1 - result.score / 100);
 
@@ -411,6 +465,7 @@ function renderResult(result) {
     li.style.color = "#4ade80";
     adviceList.appendChild(li);
   }
+  updateCopyInstructionsState(result);
 
   countsGrid.innerHTML = "";
   const entries = Object.entries(result.counts).sort((left, right) => right[1] - left[1]);
@@ -451,6 +506,20 @@ function renderResult(result) {
   }
 
   violationsSection.classList.add("visible");
+}
+
+async function copyWriterInstructions() {
+  if (!latestResult) {
+    return;
+  }
+
+  try {
+    await writeClipboardText(buildWriterInstructions(latestResult));
+    setStatus("ready", "Copied writer instructions.");
+  } catch (error) {
+    console.error("Copy instructions failed:", error);
+    setStatus("error", `Copy failed: ${error.message}`);
+  }
 }
 
 async function restoreLastReport() {
@@ -847,12 +916,18 @@ grabPageBtn.addEventListener("click", () => {
 clearBtn.addEventListener("click", () => {
   inputText.value = "";
   latestSource = null;
+  latestResult = null;
   scoreSection.classList.remove("visible");
   violationsSection.classList.remove("visible");
+  updateCopyInstructionsState(null);
   clearNotice();
   void setLastReport(null).then((saved) => {
     setStatus("ready", saved ? "Ready" : "Ready - saved result could not be cleared");
   });
+});
+
+copyInstructionsBtn.addEventListener("click", () => {
+  void copyWriterInstructions();
 });
 
 detailToggle.addEventListener("click", () => {

@@ -236,6 +236,11 @@
       line-height: 1.7;
     }
     .score-stats span { color: var(--text); }
+    .result-actions {
+      margin-top: 12px;
+      display: flex;
+      justify-content: flex-start;
+    }
 
     .violations-section {
       display: none;
@@ -366,6 +371,9 @@
           density <span id="density">0</span>
         </div>
       </div>
+    </div>
+    <div class="result-actions">
+      <button id="copyInstructionsBtn" disabled>Copy instructions</button>
     </div>
   </div>
 

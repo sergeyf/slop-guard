@@ -465,6 +465,90 @@ window.chrome = {
 
             browser.close()
 
+    def test_copy_instructions_formats_advice_for_writers(self, firefox_server):
+        with sync_playwright() as pw:
+            browser = pw.firefox.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            page.add_init_script(
+                """
+window.__copiedText = null;
+Object.defineProperty(navigator, "clipboard", {
+  configurable: true,
+  value: {
+    writeText: async (text) => {
+      window.__copiedText = text;
+    }
+  }
+});
+
+window.chrome = {
+  runtime: {
+    id: "slop-guard-test",
+    sendMessage: async (msg) => {
+      if (msg.type === "SG_INIT") {
+        return { ok: true, version: "9.9.9" };
+      }
+      if (msg.type === "SG_ANALYZE") {
+        return {
+          ok: true,
+          result: {
+            score: 34,
+            band: "heavy",
+            word_count: 9,
+            total_penalty: 18,
+            density: 2.0,
+            advice: [
+              "Replace the repeated 'blah' phrasing.",
+              "Cut the filler sentence opener."
+            ],
+            counts: { sentence_level: 2 },
+            violations: []
+          }
+        };
+      }
+      return { ok: false, error: "Unknown message" };
+    }
+  },
+  storage: {
+    local: {
+      get: async () => ({}),
+      set: async () => {},
+      remove: async () => {}
+    }
+  }
+};
+                """
+            )
+            page.goto(f"{firefox_server}/popup.html", wait_until="domcontentloaded")
+
+            expect(page.locator("#statusText")).to_have_text("Ready", timeout=10_000)
+            expect(page.locator("#copyInstructionsBtn")).to_be_disabled()
+
+            page.fill("#inputText", "blah blah blah")
+            page.click("#analyzeBtn")
+
+            expect(page.locator("#scoreSection")).to_have_class(
+                re.compile("visible"), timeout=10_000
+            )
+            expect(page.locator("#copyInstructionsBtn")).to_be_enabled()
+
+            page.click("#copyInstructionsBtn")
+            expect(page.locator("#statusText")).to_have_text(
+                "Copied writer instructions."
+            )
+
+            copied_text = page.evaluate("window.__copiedText")
+            assert copied_text == (
+                "Please fix the following writing issues. Keep the edits to the "
+                "mentioned issues only, and keep all the other content the same:\n"
+                "\n"
+                "#1 Replace the repeated 'blah' phrasing.\n"
+                "#2 Cut the filler sentence opener."
+            )
+
+            browser.close()
+
 
 class TestFirefoxErrorHandling:
     """Regression tests for timeout, validation, and persistence failures."""

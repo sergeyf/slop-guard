@@ -45,6 +45,7 @@ Firefox:
 - Click the extension icon to open the popup
 - Paste text, or use `Grab selection` / `Grab page text`
 - Press `Analyze` or use `Ctrl+Enter` / `Cmd+Enter`
+- Use `Copy instructions` to turn the current advice list into a writer-facing edit prompt
 - Reopening the popup reuses the already-initialized background runtime
 - The last report is restored when the popup opens again
 - Capture prefers selection, then the focused editor, then page text
