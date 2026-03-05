@@ -39,12 +39,14 @@ class TestPyodideInit:
     def test_version_label_populated(self, page):
         """The version label should show the slop-guard version."""
         version = page.locator("#versionLabel")
-        expect(version).not_to_have_text("loading…", timeout=PYODIDE_TIMEOUT)
+        expect(version).not_to_have_text("loading...", timeout=PYODIDE_TIMEOUT)
         assert version.text_content().startswith("v")
 
     def test_analyze_button_enabled(self, page):
         """The Analyze button should be enabled once ready."""
-        expect(page.locator("#statusText")).to_have_text("Ready", timeout=PYODIDE_TIMEOUT)
+        expect(page.locator("#statusText")).to_have_text(
+            "Ready", timeout=PYODIDE_TIMEOUT
+        )
         expect(page.locator("#analyzeBtn")).to_be_enabled()
 
 
@@ -52,7 +54,9 @@ class TestAnalysis:
     """Test text analysis end-to-end via the popup UI."""
 
     def _wait_ready(self, page):
-        expect(page.locator("#statusText")).to_have_text("Ready", timeout=PYODIDE_TIMEOUT)
+        expect(page.locator("#statusText")).to_have_text(
+            "Ready", timeout=PYODIDE_TIMEOUT
+        )
 
     def test_analyze_clean_text(self, page):
         """Clean text should score high (80-100)."""
@@ -180,7 +184,9 @@ class TestViolationDetails:
     """Test the collapsible violation detail UI."""
 
     def _analyze_sloppy(self, page):
-        expect(page.locator("#statusText")).to_have_text("Ready", timeout=PYODIDE_TIMEOUT)
+        expect(page.locator("#statusText")).to_have_text(
+            "Ready", timeout=PYODIDE_TIMEOUT
+        )
         sloppy = (
             "It's important to note that we must delve into these "
             "intricacies and navigate the complexities of this "

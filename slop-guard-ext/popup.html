@@ -4,9 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=600">
   <title>Slop Guard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -23,6 +20,9 @@
       --yellow: #fbbf24;
       --orange: #f97316;
       --red: #ef4444;
+      --blue: #60a5fa;
+      --font-sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      --font-mono: Consolas, "SFMono-Regular", Menlo, monospace;
     }
 
     body {
@@ -31,17 +31,15 @@
       overflow-y: auto;
       background: var(--bg);
       color: var(--text);
-      font-family: 'DM Sans', system-ui, sans-serif;
+      font-family: var(--font-sans);
       font-size: 13px;
       line-height: 1.5;
     }
 
-    /* Scrollbar */
     body::-webkit-scrollbar { width: 6px; }
     body::-webkit-scrollbar-track { background: var(--bg); }
     body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
-    /* Header */
     .header {
       display: flex;
       align-items: center;
@@ -51,22 +49,21 @@
       background: var(--surface);
     }
     .header h1 {
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       font-size: 14px;
       font-weight: 500;
       letter-spacing: 0.05em;
       color: var(--accent);
     }
     .header .version {
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       font-size: 11px;
       color: var(--text-dim);
     }
 
-    /* Status bar */
     .status-bar {
       padding: 10px 18px;
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       font-size: 11px;
       color: var(--text-dim);
       background: var(--surface);
@@ -76,7 +73,8 @@
       gap: 8px;
     }
     .status-dot {
-      width: 6px; height: 6px;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
       background: var(--text-dim);
       flex-shrink: 0;
@@ -89,10 +87,28 @@
       50% { opacity: 0.3; }
     }
 
-    /* Input area */
     .input-section {
       padding: 14px 18px;
       border-bottom: 1px solid var(--border);
+    }
+    .input-meta {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .field-label {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+    }
+    .field-hint {
+      font-size: 11px;
+      color: var(--text-dim);
     }
     textarea {
       width: 100%;
@@ -101,7 +117,7 @@
       border: 1px solid var(--border);
       border-radius: 6px;
       color: var(--text);
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       font-size: 12px;
       line-height: 1.6;
       padding: 10px 12px;
@@ -110,6 +126,12 @@
       transition: border-color 0.15s;
     }
     textarea:focus { border-color: var(--accent); }
+    textarea:focus-visible,
+    button:focus-visible,
+    .violations-toggle:focus-visible {
+      outline: 2px solid var(--blue);
+      outline-offset: 2px;
+    }
     textarea::placeholder { color: var(--text-dim); }
 
     .btn-row {
@@ -118,7 +140,7 @@
       margin-top: 10px;
     }
     button {
-      font-family: 'DM Sans', system-ui, sans-serif;
+      font-family: var(--font-sans);
       font-size: 12px;
       font-weight: 500;
       padding: 7px 14px;
@@ -138,8 +160,26 @@
       color: #fff;
     }
     button.primary:hover { background: #d13a52; }
+    .notice {
+      display: none;
+      margin-top: 10px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    .notice.visible { display: block; }
+    .notice.warning {
+      border-color: #7c2d12;
+      color: #fdba74;
+    }
+    .notice.info {
+      border-color: #1d4ed8;
+      color: #bfdbfe;
+    }
 
-    /* Score display */
     .score-section {
       display: none;
       padding: 18px;
@@ -154,7 +194,8 @@
     }
     .score-ring {
       position: relative;
-      width: 80px; height: 80px;
+      width: 80px;
+      height: 80px;
       flex-shrink: 0;
     }
     .score-ring svg { transform: rotate(-90deg); }
@@ -175,16 +216,14 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       font-size: 22px;
       font-weight: 500;
     }
 
-    .score-meta {
-      flex: 1;
-    }
+    .score-meta { flex: 1; }
     .score-band {
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       font-size: 13px;
       font-weight: 500;
       text-transform: uppercase;
@@ -197,8 +236,12 @@
       line-height: 1.7;
     }
     .score-stats span { color: var(--text); }
+    .result-actions {
+      margin-top: 12px;
+      display: flex;
+      justify-content: flex-start;
+    }
 
-    /* Violations */
     .violations-section {
       display: none;
       padding: 0 18px 14px;
@@ -206,7 +249,7 @@
     .violations-section.visible { display: block; }
 
     .section-title {
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       font-size: 11px;
       font-weight: 500;
       color: var(--text-dim);
@@ -215,9 +258,7 @@
       padding: 14px 0 8px;
     }
 
-    .advice-list {
-      list-style: none;
-    }
+    .advice-list { list-style: none; }
     .advice-list li {
       padding: 6px 0;
       border-bottom: 1px solid var(--border);
@@ -225,20 +266,9 @@
       line-height: 1.5;
     }
     .advice-list li:last-child { border-bottom: none; }
-    .advice-list .rule-tag {
-      font-family: 'DM Mono', monospace;
-      font-size: 10px;
-      background: var(--surface-2);
-      border: 1px solid var(--border);
-      border-radius: 3px;
-      padding: 1px 5px;
-      margin-right: 6px;
-      color: var(--text-dim);
-    }
 
-    /* Violation details (collapsible) */
     .violations-toggle {
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       font-size: 11px;
       color: var(--text-dim);
       background: none;
@@ -264,22 +294,21 @@
       font-size: 11px;
     }
     .violation-item .v-match {
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       color: var(--accent);
     }
     .violation-item .v-context {
       color: var(--text-dim);
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       font-size: 10px;
       margin-top: 2px;
       word-break: break-all;
     }
     .violation-item .v-penalty {
       color: var(--orange);
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
     }
 
-    /* Counts summary */
     .counts-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -292,7 +321,7 @@
     }
     .counts-grid .count-label { color: var(--text-dim); }
     .counts-grid .count-value {
-      font-family: 'DM Mono', monospace;
+      font-family: var(--font-mono);
       color: var(--text);
     }
     .counts-grid .count-value.zero { color: var(--text-dim); }
@@ -301,42 +330,50 @@
 <body>
   <div class="header">
     <h1>SLOP GUARD</h1>
-    <span class="version" id="versionLabel">loading…</span>
+    <span class="version" id="versionLabel">loading...</span>
   </div>
 
-  <div class="status-bar">
+  <div class="status-bar" role="status" aria-live="polite">
     <div class="status-dot loading" id="statusDot"></div>
-    <span id="statusText">Loading Pyodide…</span>
+    <span id="statusText">Loading Pyodide...</span>
   </div>
 
   <div class="input-section">
-    <textarea id="inputText" placeholder="Paste text to analyze, or grab it from the page…"></textarea>
+    <div class="input-meta">
+      <label class="field-label" for="inputText">Text to analyze</label>
+      <span class="field-hint" id="inputHint">Ctrl+Enter / Cmd+Enter to analyze</span>
+    </div>
+    <textarea id="inputText" aria-describedby="inputHint captureNotice" placeholder="Paste text to analyze, or grab it from the page..."></textarea>
     <div class="btn-row">
       <button class="primary" id="analyzeBtn" disabled>Analyze</button>
       <button id="grabSelBtn" disabled>Grab selection</button>
       <button id="grabPageBtn" disabled>Grab page text</button>
       <button id="clearBtn">Clear</button>
     </div>
+    <div class="notice" id="captureNotice"></div>
   </div>
 
   <div class="score-section" id="scoreSection">
     <div class="score-hero">
       <div class="score-ring">
-        <svg viewBox="0 0 80 80" width="80" height="80">
+        <svg viewBox="0 0 80 80" width="80" height="80" aria-hidden="true" focusable="false">
           <circle class="track" cx="40" cy="40" r="34" />
-          <circle class="fill" id="scoreArc" cx="40" cy="40" r="34" 
+          <circle class="fill" id="scoreArc" cx="40" cy="40" r="34"
                   stroke-dasharray="213.63" stroke-dashoffset="213.63" />
         </svg>
-        <div class="score-number" id="scoreNumber">—</div>
+        <div class="score-number" id="scoreNumber">-</div>
       </div>
       <div class="score-meta">
-        <div class="score-band" id="scoreBand">—</div>
+        <div class="score-band" id="scoreBand">-</div>
         <div class="score-stats">
-          <span id="wordCount">0</span> words · 
-          penalty <span id="totalPenalty">0</span> · 
+          <span id="wordCount">0</span> words |
+          penalty <span id="totalPenalty">0</span> |
           density <span id="density">0</span>
         </div>
       </div>
+    </div>
+    <div class="result-actions">
+      <button id="copyInstructionsBtn" disabled>Copy instructions</button>
     </div>
   </div>
 
@@ -347,7 +384,7 @@
     <div class="section-title">Category counts</div>
     <div class="counts-grid" id="countsGrid"></div>
 
-    <button class="violations-toggle" id="detailToggle">Show all violations</button>
+    <button class="violations-toggle" id="detailToggle" aria-controls="violationDetail" aria-expanded="false">Show all violations</button>
     <div class="violation-detail" id="violationDetail"></div>
   </div>
 

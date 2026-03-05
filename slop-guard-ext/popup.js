@@ -1,9 +1,14 @@
-/* Slop Guard – popup controller */
+/* Slop Guard popup controller. */
 
 const ext = globalThis.browser ?? globalThis.chrome;
-const CIRC = 2 * Math.PI * 34; // circumference of score ring (r=34)
+const CIRC = 2 * Math.PI * 34;
 const LAST_REPORT_STORAGE_KEY = "lastReport";
+const PENDING_TEXT_STORAGE_KEY = "pendingText";
+const PENDING_TAB_ID_STORAGE_KEY = "pendingTextTabId";
 const DEFAULT_CAPTURE_MAX_CHARS = 100000;
+const DEFAULT_ANALYSIS_TIMEOUT_MS = 30000;
+const MIN_TIMEOUT_MS = 1000;
+const MAX_TIMEOUT_MS = 120000;
 
 const BAND_COLORS = {
   clean: "#4ade80",
@@ -13,23 +18,9 @@ const BAND_COLORS = {
   saturated: "#ef4444",
 };
 
-// Resolve Pyodide index URL from build config (config.js).
-// Falls back to CDN if config.js is not present (dev/unbundled mode).
-function resolvePyodideIndexURL() {
-  if (typeof EXT_CONFIG !== "undefined" && EXT_CONFIG.PYODIDE_INDEX_URL) {
-    const url = EXT_CONFIG.PYODIDE_INDEX_URL;
-    if (url.startsWith("__EXTENSION_URL__")) {
-      if (ext?.runtime?.getURL) {
-        return ext.runtime.getURL(url.replace("__EXTENSION_URL__", ""));
-      }
-      return url.replace("__EXTENSION_URL__", "");
-    }
-    return url;
-  }
-  return "https://cdn.jsdelivr.net/pyodide/v0.27.7/full/";
-}
+const VALID_BANDS = new Set(Object.keys(BAND_COLORS));
+const ANALYSIS_TIMEOUT_MS = resolveAnalysisTimeoutMs();
 
-// DOM refs
 const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
 const versionLabel = document.getElementById("versionLabel");
@@ -38,6 +29,8 @@ const analyzeBtn = document.getElementById("analyzeBtn");
 const grabSelBtn = document.getElementById("grabSelBtn");
 const grabPageBtn = document.getElementById("grabPageBtn");
 const clearBtn = document.getElementById("clearBtn");
+const copyInstructionsBtn = document.getElementById("copyInstructionsBtn");
+const captureNotice = document.getElementById("captureNotice");
 const scoreSection = document.getElementById("scoreSection");
 const scoreArc = document.getElementById("scoreArc");
 const scoreNumber = document.getElementById("scoreNumber");
@@ -55,275 +48,103 @@ let pyodide = null;
 let ready = false;
 let runtimeMode = "popup";
 let latestSource = null;
+let latestResult = null;
 
-// ── Initialization ──────────────────────────────────────────────────────────
-
-async function init() {
-  try {
-    const connectedToBackground = await tryInitBackgroundRuntime();
-    if (connectedToBackground) {
-      ready = true;
-      runtimeMode = "background";
-      enableButtons();
-      setStatus("ready", "Ready");
-      await restoreLastReport();
-      await checkPendingText();
-      return;
+function resolvePyodideIndexURL() {
+  if (typeof EXT_CONFIG !== "undefined" && EXT_CONFIG.PYODIDE_INDEX_URL) {
+    const url = EXT_CONFIG.PYODIDE_INDEX_URL;
+    if (url.startsWith("__EXTENSION_URL__")) {
+      if (ext?.runtime?.getURL) {
+        return ext.runtime.getURL(url.replace("__EXTENSION_URL__", ""));
+      }
+      return url.replace("__EXTENSION_URL__", "");
     }
-
-    await initPopupRuntime();
-  } catch (err) {
-    console.error("Init failed:", err);
-    setStatus("error", `Init failed: ${err.message}`);
+    return url;
   }
+  return "https://cdn.jsdelivr.net/pyodide/v0.27.7/full/";
 }
 
-async function tryInitBackgroundRuntime() {
-  if (!hasExtensionRuntime()) {
-    return false;
+function sanitizeTimeoutMs(value) {
+  const parsed = Number.parseInt(String(value ?? DEFAULT_ANALYSIS_TIMEOUT_MS), 10);
+  if (!Number.isFinite(parsed) || parsed < MIN_TIMEOUT_MS) {
+    return DEFAULT_ANALYSIS_TIMEOUT_MS;
   }
-
-  setStatus("loading", "Connecting runtime…");
-  const response = await sendBackgroundMessage({ type: "SG_INIT" });
-  if (!response || !response.ok || !response.version) {
-    return false;
-  }
-
-  versionLabel.textContent = `v${response.version}`;
-  return true;
+  return Math.min(parsed, MAX_TIMEOUT_MS);
 }
 
-async function initPopupRuntime() {
-  if (typeof loadPyodide === "undefined") {
-    setStatus("error", "pyodide.js not found — run update.sh or update.ps1 first");
-    versionLabel.textContent = "setup needed";
+function resolveAnalysisTimeoutMs() {
+  const search = new URLSearchParams(globalThis.location?.search || "");
+  return sanitizeTimeoutMs(search.get("timeoutMs"));
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = globalThis.setTimeout(() => {
+      reject(new Error(label));
+    }, timeoutMs);
+
+    Promise.resolve(promise).then(
+      (value) => {
+        globalThis.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        globalThis.clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+}
+
+function cleanupPyodideGlobals(pyodideInstance, names) {
+  if (!pyodideInstance?.globals) {
     return;
   }
-
-  const indexURL = resolvePyodideIndexURL();
-  setStatus("loading", "Loading Pyodide runtime…");
-  pyodide = await loadPyodide({ indexURL });
-
-  if (typeof PYTHON_FILES === "undefined") {
-    setStatus("error", "python_bundle.js not found — run update.sh or update.ps1 first");
-    versionLabel.textContent = "setup needed";
-    return;
-  }
-
-  setStatus("loading", "Writing slop-guard to filesystem…");
-  writePythonFiles();
-
-  setStatus("loading", "Importing slop-guard…");
-  await pyodide.runPythonAsync(`
-import slop_guard
-_sg_version = slop_guard.PACKAGE_VERSION
-  `);
-
-  const versionHandle = pyodide.globals.get("_sg_version");
-  const version = String(versionHandle);
-  if (versionHandle && typeof versionHandle.destroy === "function") {
-    versionHandle.destroy();
-  }
-  versionLabel.textContent = `v${version}`;
-
-  ready = true;
-  runtimeMode = "popup";
-  enableButtons();
-  setStatus("ready", "Ready");
-  await restoreLastReport();
-  await checkPendingText();
-}
-
-function writePythonFiles() {
-  // Detect Python version to find site-packages path
-  const pyVer = pyodide.runPython(
-    'import sys; f"{sys.version_info.major}.{sys.version_info.minor}"',
-  );
-  const sitePackages = `/lib/python${pyVer}/site-packages`;
-
-  // Ensure directory structure
-  const dirs = new Set();
-  for (const relPath of Object.keys(PYTHON_FILES)) {
-    const parts = relPath.split("/");
-    for (let i = 1; i < parts.length; i += 1) {
-      dirs.add(parts.slice(0, i).join("/"));
-    }
-  }
-  for (const dir of [...dirs].sort()) {
-    const fullDir = `${sitePackages}/${dir}`;
+  for (const name of names) {
     try {
-      pyodide.FS.mkdirTree(fullDir);
+      pyodideInstance.globals.delete(name);
     } catch (_) {
-      // Directory already exists.
+      // Ignore cleanup failures.
     }
-  }
-
-  // Write files
-  for (const [relPath, content] of Object.entries(PYTHON_FILES)) {
-    pyodide.FS.writeFile(`${sitePackages}/${relPath}`, content, {
-      encoding: "utf8",
-    });
   }
 }
 
-// ── Analysis ────────────────────────────────────────────────────────────────
+function setStatus(state, message) {
+  statusDot.className = `status-dot ${state}`;
+  statusText.textContent = message;
+}
 
-async function analyze(text, source = null) {
-  if (!ready || !text.trim()) {
+function showNotice(message, tone = "info") {
+  if (!message) {
+    clearNotice();
     return;
   }
-
-  analyzeBtn.disabled = true;
-  analyzeBtn.textContent = "Analyzing…";
-  setStatus("loading", "Analyzing…");
-
-  try {
-    const result = runtimeMode === "background"
-      ? await analyzeViaBackground(text)
-      : await analyzeViaPopup(text);
-
-    renderResult(result);
-    await setLastReport({
-      capturedAt: new Date().toISOString(),
-      source: normalizeSource(source ?? latestSource),
-      result,
-    });
-    setStatus("ready", "Ready");
-  } catch (err) {
-    console.error("Analysis error:", err);
-    setStatus("error", `Error: ${err.message}`);
-  } finally {
-    analyzeBtn.disabled = false;
-    analyzeBtn.textContent = "Analyze";
-  }
+  captureNotice.textContent = message;
+  captureNotice.className = `notice ${tone} visible`;
 }
 
-async function analyzeViaPopup(text) {
-  pyodide.globals.set("_input_text", text);
-  await pyodide.runPythonAsync(`
-import json as _json
-_result = _json.dumps(slop_guard.analyze(_input_text))
-  `);
-  const resultHandle = pyodide.globals.get("_result");
-  const result = JSON.parse(String(resultHandle));
-  if (resultHandle && typeof resultHandle.destroy === "function") {
-    resultHandle.destroy();
-  }
-  try {
-    pyodide.globals.delete("_input_text");
-    pyodide.globals.delete("_result");
-  } catch (_) {
-    // Ignore cleanup failures.
-  }
-  return result;
-}
-
-async function analyzeViaBackground(text) {
-  const response = await sendBackgroundMessage({ type: "SG_ANALYZE", text });
-  if (!response || !response.ok) {
-    const message = response && response.error
-      ? response.error
-      : "Background runtime unavailable";
-    throw new Error(message);
-  }
-  return response.result;
-}
-
-// ── Rendering ───────────────────────────────────────────────────────────────
-
-function renderResult(result) {
-  const color = BAND_COLORS[result.band] || BAND_COLORS.moderate;
-
-  // Score ring
-  const offset = CIRC * (1 - result.score / 100);
-  scoreArc.style.strokeDashoffset = offset;
-  scoreArc.style.stroke = color;
-  scoreNumber.textContent = result.score;
-  scoreNumber.style.color = color;
-
-  // Band label
-  scoreBand.textContent = result.band;
-  scoreBand.style.color = color;
-
-  // Stats
-  wordCount.textContent = result.word_count;
-  totalPenalty.textContent = result.total_penalty;
-  density.textContent = result.density;
-
-  scoreSection.classList.add("visible");
-
-  // Advice
-  adviceList.innerHTML = "";
-  if (result.advice && result.advice.length) {
-    for (const tip of result.advice) {
-      const li = document.createElement("li");
-      li.textContent = tip;
-      adviceList.appendChild(li);
-    }
-  } else {
-    const li = document.createElement("li");
-    li.textContent = "No issues found.";
-    li.style.color = "#4ade80";
-    adviceList.appendChild(li);
-  }
-
-  // Category counts
-  countsGrid.innerHTML = "";
-  if (result.counts) {
-    const entries = Object.entries(result.counts).sort((a, b) => b[1] - a[1]);
-    for (const [key, val] of entries) {
-      const row = document.createElement("div");
-      row.className = "count-row";
-      const label = document.createElement("span");
-      label.className = "count-label";
-      label.textContent = key.replace(/_/g, " ");
-      const value = document.createElement("span");
-      value.className = `count-value${val === 0 ? " zero" : ""}`;
-      value.textContent = val;
-      row.appendChild(label);
-      row.appendChild(value);
-      countsGrid.appendChild(row);
-    }
-  }
-
-  // Violation details
-  violationDetail.innerHTML = "";
-  violationDetail.classList.remove("visible");
-  detailToggle.textContent = "Show all violations";
-  if (result.violations && result.violations.length) {
-    detailToggle.style.display = "";
-    for (const violation of result.violations) {
-      const item = document.createElement("div");
-      item.className = "violation-item";
-      item.innerHTML = `<span class="v-match">${esc(violation.match)}</span> `
-        + `<span class="v-penalty">${violation.penalty}</span>`
-        + `<div class="v-context">${esc(violation.context)}</div>`;
-      violationDetail.appendChild(item);
-    }
-  } else {
-    detailToggle.style.display = "none";
-  }
-
-  violationsSection.classList.add("visible");
-}
-
-function esc(text) {
-  const el = document.createElement("span");
-  el.textContent = text;
-  return el.innerHTML;
-}
-
-// ── UI Helpers ──────────────────────────────────────────────────────────────
-
-function setStatus(state, msg) {
-  statusDot.className = `status-dot ${state}`;
-  statusText.textContent = msg;
+function clearNotice() {
+  captureNotice.textContent = "";
+  captureNotice.className = "notice";
 }
 
 function enableButtons() {
   analyzeBtn.disabled = false;
   grabSelBtn.disabled = false;
   grabPageBtn.disabled = false;
+}
+
+function getActionableAdvice(result) {
+  if (!result || !Array.isArray(result.advice)) {
+    return [];
+  }
+  return result.advice
+    .map((item) => String(item).trim())
+    .filter((item) => item.length > 0);
+}
+
+function updateCopyInstructionsState(result) {
+  copyInstructionsBtn.disabled = getActionableAdvice(result).length === 0;
 }
 
 function normalizeSource(source) {
@@ -341,6 +162,98 @@ function sanitizeMaxChars(value) {
     return DEFAULT_CAPTURE_MAX_CHARS;
   }
   return Math.min(parsed, 500000);
+}
+
+function requireFiniteNumber(value, fieldName) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    throw new Error(`Analysis result has invalid ${fieldName}`);
+  }
+  return number;
+}
+
+function normalizeCounts(value) {
+  if (value == null) {
+    return {};
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Analysis result has invalid counts");
+  }
+
+  const counts = {};
+  for (const [key, rawValue] of Object.entries(value)) {
+    counts[key] = Math.max(0, Math.trunc(requireFiniteNumber(rawValue, `counts.${key}`)));
+  }
+  return counts;
+}
+
+function normalizeViolations(value) {
+  if (value == null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("Analysis result has invalid violations");
+  }
+
+  return value.map((violation, index) => {
+    if (!violation || typeof violation !== "object") {
+      throw new Error(`Analysis result has invalid violations.${index}`);
+    }
+    return {
+      match: String(violation.match ?? ""),
+      context: String(violation.context ?? ""),
+      penalty: requireFiniteNumber(violation.penalty ?? 0, `violations.${index}.penalty`),
+    };
+  });
+}
+
+function normalizeAdvice(value) {
+  if (value == null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("Analysis result has invalid advice");
+  }
+  return value.map((item) => String(item));
+}
+
+function validateAnalysisResult(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("Analysis result is not an object");
+  }
+
+  const band = String(result.band ?? "").toLowerCase();
+  if (!VALID_BANDS.has(band)) {
+    throw new Error(`Analysis result has invalid band: ${band || "<missing>"}`);
+  }
+
+  const score = Math.round(requireFiniteNumber(result.score, "score"));
+  if (score < 0 || score > 100) {
+    throw new Error(`Analysis result has out-of-range score: ${score}`);
+  }
+
+  const validated = {
+    score,
+    band,
+    word_count: Math.max(0, Math.trunc(requireFiniteNumber(result.word_count, "word_count"))),
+    total_penalty: requireFiniteNumber(result.total_penalty, "total_penalty"),
+    density: requireFiniteNumber(result.density, "density"),
+    counts: normalizeCounts(result.counts),
+    advice: normalizeAdvice(result.advice),
+    violations: normalizeViolations(result.violations),
+  };
+
+  if (result.weighted_sum != null) {
+    validated.weighted_sum = requireFiniteNumber(result.weighted_sum, "weighted_sum");
+  }
+
+  return validated;
+}
+
+function esc(text) {
+  const el = document.createElement("span");
+  el.textContent = text;
+  return el.innerHTML;
 }
 
 function callExtensionApi(fn, ...args) {
@@ -440,6 +353,18 @@ function sendBackgroundMessage(message) {
     .catch(() => null);
 }
 
+async function clearActionBadge(tabId = null) {
+  if (!ext?.action?.setBadgeText) {
+    return;
+  }
+  const details = Number.isInteger(tabId) ? { tabId, text: "" } : { text: "" };
+  try {
+    await callExtensionApi(ext.action.setBadgeText.bind(ext.action), details);
+  } catch (_) {
+    // Ignore action badge cleanup failures.
+  }
+}
+
 async function getLastReport() {
   if (!ext?.storage?.local?.get) {
     return null;
@@ -457,24 +382,337 @@ async function getLastReport() {
 
 async function setLastReport(payload) {
   if (!ext?.storage?.local?.set) {
-    return;
+    return true;
   }
   try {
     await callExtensionApi(
       ext.storage.local.set.bind(ext.storage.local),
       { [LAST_REPORT_STORAGE_KEY]: payload },
     );
-  } catch (_) {
-    // Ignore storage errors in non-extension contexts.
+    return true;
+  } catch (error) {
+    console.error("Persisting the last report failed:", error);
+    return false;
+  }
+}
+
+function buildWriterInstructions(result) {
+  const actionableAdvice = getActionableAdvice(result);
+  if (actionableAdvice.length === 0) {
+    throw new Error("No writing issues available to copy.");
+  }
+
+  return [
+    "Please fix the following writing issues. Keep the edits to the mentioned issues only, and keep all the other content the same:",
+    "",
+    ...actionableAdvice.map((item, index) => `#${index + 1} ${item}`),
+  ].join("\n");
+}
+
+async function writeClipboardText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const scratch = document.createElement("textarea");
+  scratch.value = text;
+  scratch.setAttribute("readonly", "true");
+  scratch.style.position = "fixed";
+  scratch.style.opacity = "0";
+  scratch.style.pointerEvents = "none";
+  document.body.appendChild(scratch);
+  scratch.select();
+
+  try {
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("Clipboard copy command was rejected.");
+    }
+  } finally {
+    document.body.removeChild(scratch);
+  }
+}
+
+function renderResult(result) {
+  latestResult = result;
+  const color = BAND_COLORS[result.band] || BAND_COLORS.moderate;
+  const offset = CIRC * (1 - result.score / 100);
+
+  scoreArc.style.strokeDashoffset = offset;
+  scoreArc.style.stroke = color;
+  scoreNumber.textContent = result.score;
+  scoreNumber.style.color = color;
+
+  scoreBand.textContent = result.band;
+  scoreBand.style.color = color;
+
+  wordCount.textContent = result.word_count;
+  totalPenalty.textContent = result.total_penalty;
+  density.textContent = result.density;
+  scoreSection.classList.add("visible");
+
+  adviceList.innerHTML = "";
+  if (result.advice.length > 0) {
+    for (const tip of result.advice) {
+      const li = document.createElement("li");
+      li.textContent = tip;
+      adviceList.appendChild(li);
+    }
+  } else {
+    const li = document.createElement("li");
+    li.textContent = "No issues found.";
+    li.style.color = "#4ade80";
+    adviceList.appendChild(li);
+  }
+  updateCopyInstructionsState(result);
+
+  countsGrid.innerHTML = "";
+  const entries = Object.entries(result.counts).sort((left, right) => right[1] - left[1]);
+  for (const [key, value] of entries) {
+    const row = document.createElement("div");
+    row.className = "count-row";
+
+    const label = document.createElement("span");
+    label.className = "count-label";
+    label.textContent = key.replace(/_/g, " ");
+
+    const count = document.createElement("span");
+    count.className = `count-value${value === 0 ? " zero" : ""}`;
+    count.textContent = value;
+
+    row.appendChild(label);
+    row.appendChild(count);
+    countsGrid.appendChild(row);
+  }
+
+  violationDetail.innerHTML = "";
+  violationDetail.classList.remove("visible");
+  detailToggle.textContent = "Show all violations";
+  detailToggle.setAttribute("aria-expanded", "false");
+
+  if (result.violations.length > 0) {
+    detailToggle.style.display = "";
+    for (const violation of result.violations) {
+      const item = document.createElement("div");
+      item.className = "violation-item";
+      item.innerHTML = `<span class="v-match">${esc(violation.match)}</span> `
+        + `<span class="v-penalty">${violation.penalty}</span>`
+        + `<div class="v-context">${esc(violation.context)}</div>`;
+      violationDetail.appendChild(item);
+    }
+  } else {
+    detailToggle.style.display = "none";
+  }
+
+  violationsSection.classList.add("visible");
+}
+
+async function copyWriterInstructions() {
+  if (!latestResult) {
+    return;
+  }
+
+  try {
+    await writeClipboardText(buildWriterInstructions(latestResult));
+    setStatus("ready", "Copied writer instructions.");
+  } catch (error) {
+    console.error("Copy instructions failed:", error);
+    setStatus("error", `Copy failed: ${error.message}`);
   }
 }
 
 async function restoreLastReport() {
   const report = await getLastReport();
-  if (report?.result) {
-    renderResult(report.result);
-    latestSource = report.source || null;
+  if (!report?.result) {
+    return;
   }
+
+  try {
+    const result = validateAnalysisResult(report.result);
+    renderResult(result);
+    latestSource = report.source || null;
+    if (report.source?.warning) {
+      showNotice(report.source.warning, "warning");
+    }
+  } catch (error) {
+    console.error("Discarding invalid saved report:", error);
+    latestSource = null;
+    await setLastReport(null);
+    showNotice("Saved report was invalid and has been discarded.", "info");
+  }
+}
+
+async function init() {
+  try {
+    const connectedToBackground = await tryInitBackgroundRuntime();
+    if (connectedToBackground) {
+      ready = true;
+      runtimeMode = "background";
+      enableButtons();
+      setStatus("ready", "Ready");
+      await restoreLastReport();
+      await checkPendingText();
+      return;
+    }
+
+    await initPopupRuntime();
+  } catch (error) {
+    console.error("Init failed:", error);
+    setStatus("error", `Init failed: ${error.message}`);
+  }
+}
+
+async function tryInitBackgroundRuntime() {
+  if (!hasExtensionRuntime()) {
+    return false;
+  }
+
+  setStatus("loading", "Connecting runtime...");
+  const response = await sendBackgroundMessage({ type: "SG_INIT" });
+  if (!response || !response.ok || !response.version) {
+    return false;
+  }
+
+  versionLabel.textContent = `v${response.version}`;
+  return true;
+}
+
+async function initPopupRuntime() {
+  if (typeof loadPyodide === "undefined") {
+    setStatus("error", "pyodide.js not found - run uv run build.py first");
+    versionLabel.textContent = "setup needed";
+    return;
+  }
+
+  setStatus("loading", "Loading Pyodide runtime...");
+  pyodide = await loadPyodide({ indexURL: resolvePyodideIndexURL() });
+
+  if (typeof PYTHON_FILES === "undefined") {
+    setStatus("error", "python_bundle.js not found - run uv run build.py first");
+    versionLabel.textContent = "setup needed";
+    return;
+  }
+
+  setStatus("loading", "Writing slop-guard to the filesystem...");
+  writePythonFiles();
+
+  setStatus("loading", "Importing slop-guard...");
+  await pyodide.runPythonAsync(`
+import slop_guard
+_sg_version = slop_guard.PACKAGE_VERSION
+  `);
+
+  const versionHandle = pyodide.globals.get("_sg_version");
+  const version = String(versionHandle);
+  if (versionHandle && typeof versionHandle.destroy === "function") {
+    versionHandle.destroy();
+  }
+
+  versionLabel.textContent = `v${version}`;
+  ready = true;
+  runtimeMode = "popup";
+  enableButtons();
+  setStatus("ready", "Ready");
+  await restoreLastReport();
+  await checkPendingText();
+}
+
+function writePythonFiles() {
+  const pyVer = pyodide.runPython(
+    'import sys; f"{sys.version_info.major}.{sys.version_info.minor}"',
+  );
+  const sitePackages = `/lib/python${pyVer}/site-packages`;
+  const dirs = new Set();
+
+  for (const relPath of Object.keys(PYTHON_FILES)) {
+    const parts = relPath.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      dirs.add(parts.slice(0, index).join("/"));
+    }
+  }
+
+  for (const dir of [...dirs].sort()) {
+    try {
+      pyodide.FS.mkdirTree(`${sitePackages}/${dir}`);
+    } catch (_) {
+      // Directory already exists.
+    }
+  }
+
+  for (const [relPath, content] of Object.entries(PYTHON_FILES)) {
+    pyodide.FS.writeFile(`${sitePackages}/${relPath}`, content, {
+      encoding: "utf8",
+    });
+  }
+}
+
+async function analyze(text, source = null) {
+  if (!ready || !text.trim()) {
+    return;
+  }
+
+  analyzeBtn.disabled = true;
+  analyzeBtn.textContent = "Analyzing...";
+  setStatus("loading", "Analyzing...");
+
+  try {
+    const rawResult = await withTimeout(
+      runtimeMode === "background" ? analyzeViaBackground(text) : analyzeViaPopup(text),
+      ANALYSIS_TIMEOUT_MS,
+      `Analysis timed out after ${Math.round(ANALYSIS_TIMEOUT_MS / 1000)}s.`,
+    );
+    const result = validateAnalysisResult(rawResult);
+
+    renderResult(result);
+    const normalizedSource = normalizeSource(source ?? latestSource);
+    const saved = await setLastReport({
+      capturedAt: new Date().toISOString(),
+      source: normalizedSource,
+      result,
+    });
+
+    latestSource = normalizedSource;
+    if (normalizedSource.warning) {
+      showNotice(normalizedSource.warning, "warning");
+    }
+    setStatus("ready", saved ? "Ready" : "Ready - result not saved");
+  } catch (error) {
+    console.error("Analysis error:", error);
+    setStatus("error", `Error: ${error.message}`);
+  } finally {
+    analyzeBtn.disabled = false;
+    analyzeBtn.textContent = "Analyze";
+  }
+}
+
+async function analyzeViaPopup(text) {
+  pyodide.globals.set("_input_text", text);
+  try {
+    await pyodide.runPythonAsync(`
+import json as _json
+_result = _json.dumps(slop_guard.analyze(_input_text))
+  `);
+    const resultHandle = pyodide.globals.get("_result");
+    try {
+      return JSON.parse(String(resultHandle));
+    } finally {
+      if (resultHandle && typeof resultHandle.destroy === "function") {
+        resultHandle.destroy();
+      }
+    }
+  } finally {
+    cleanupPyodideGlobals(pyodide, ["_input_text", "_result"]);
+  }
+}
+
+async function analyzeViaBackground(text) {
+  const response = await sendBackgroundMessage({ type: "SG_ANALYZE", text });
+  if (!response || !response.ok) {
+    const message = response?.error || "Background runtime unavailable";
+    throw new Error(message);
+  }
+  return response.result;
 }
 
 function injectedCapture(mode, maxChars) {
@@ -531,7 +769,6 @@ function injectedCapture(mode, maxChars) {
   const selectionText = (window.getSelection?.().toString() || "").trim();
   const activeText = readEditableText(document.activeElement);
   const pageText = readPageText();
-
   const candidates = mode === "page"
     ? [
       ["page", pageText],
@@ -571,11 +808,11 @@ function injectedCapture(mode, maxChars) {
 
 async function captureFromActiveTab(mode) {
   if (!ext?.tabs?.query || !ext?.scripting?.executeScript) {
-    setStatus("ready", "Cannot access page — paste text manually");
+    setStatus("ready", "Cannot access the page - paste text manually");
     return;
   }
 
-  setStatus("loading", mode === "selection" ? "Capturing selection…" : "Capturing page text…");
+  setStatus("loading", mode === "selection" ? "Capturing selection..." : "Capturing page text...");
 
   try {
     const tabs = await callExtensionApi(
@@ -600,21 +837,25 @@ async function captureFromActiveTab(mode) {
     if (payload?.text) {
       inputText.value = payload.text;
       latestSource = payload;
-      const warning = payload.warning ? ` ${payload.warning}` : "";
-      const kind = payload.kind || mode;
-      setStatus("ready", `Captured ${kind} text.${warning}`.trim());
+      if (payload.warning) {
+        showNotice(payload.warning, "warning");
+      } else {
+        clearNotice();
+      }
+      setStatus("ready", `Captured ${payload.kind || mode} text.`);
       return;
     }
 
+    clearNotice();
     setStatus(
       "ready",
       mode === "selection"
         ? "No selection, editor text, or page text found"
         : "No page text, selection, or editor text found",
     );
-  } catch (err) {
-    console.error("Capture failed:", err);
-    setStatus("ready", "Cannot access page — paste text manually");
+  } catch (error) {
+    console.error("Capture failed:", error);
+    setStatus("ready", "Cannot access the page - paste text manually");
   }
 }
 
@@ -626,28 +867,38 @@ async function checkPendingText() {
   try {
     const data = await callExtensionApi(
       ext.storage.local.get.bind(ext.storage.local),
-      "pendingText",
+      {
+        [PENDING_TEXT_STORAGE_KEY]: null,
+        [PENDING_TAB_ID_STORAGE_KEY]: null,
+      },
     );
-    const pendingText = data?.pendingText;
+    const pendingText = data?.[PENDING_TEXT_STORAGE_KEY];
+    const pendingTabId = data?.[PENDING_TAB_ID_STORAGE_KEY];
     if (!pendingText) {
       return;
     }
 
     inputText.value = pendingText;
-    latestSource = { kind: "context-menu", warning: null, title: null, url: null };
+    latestSource = {
+      kind: "context-menu",
+      warning: null,
+      title: null,
+      url: null,
+    };
+    clearNotice();
+
     if (ext.storage.local.remove) {
-      await callExtensionApi(ext.storage.local.remove.bind(ext.storage.local), "pendingText");
+      await callExtensionApi(
+        ext.storage.local.remove.bind(ext.storage.local),
+        [PENDING_TEXT_STORAGE_KEY, PENDING_TAB_ID_STORAGE_KEY],
+      );
     }
-    if (ext?.action?.setBadgeText) {
-      await callExtensionApi(ext.action.setBadgeText.bind(ext.action), { text: "" });
-    }
+    await clearActionBadge(pendingTabId);
     await analyze(pendingText, latestSource);
   } catch (_) {
     // Ignore storage errors in non-extension contexts.
   }
 }
-
-// ── Events ──────────────────────────────────────────────────────────────────
 
 analyzeBtn.addEventListener("click", () => {
   const source = latestSource || { kind: "manual", warning: null, title: null, url: null };
@@ -665,24 +916,40 @@ grabPageBtn.addEventListener("click", () => {
 clearBtn.addEventListener("click", () => {
   inputText.value = "";
   latestSource = null;
+  latestResult = null;
   scoreSection.classList.remove("visible");
   violationsSection.classList.remove("visible");
-  void setLastReport(null);
+  updateCopyInstructionsState(null);
+  clearNotice();
+  void setLastReport(null).then((saved) => {
+    setStatus("ready", saved ? "Ready" : "Ready - saved result could not be cleared");
+  });
+});
+
+copyInstructionsBtn.addEventListener("click", () => {
+  void copyWriterInstructions();
 });
 
 detailToggle.addEventListener("click", () => {
   const visible = violationDetail.classList.toggle("visible");
   detailToggle.textContent = visible ? "Hide violations" : "Show all violations";
+  detailToggle.setAttribute("aria-expanded", visible ? "true" : "false");
 });
 
-inputText.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-    e.preventDefault();
+inputText.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
     const source = latestSource || { kind: "manual", warning: null, title: null, url: null };
     void analyze(inputText.value, source);
   }
 });
 
-// ── Boot ────────────────────────────────────────────────────────────────────
+inputText.addEventListener("input", (event) => {
+  if (!event.isTrusted) {
+    return;
+  }
+  latestSource = null;
+  clearNotice();
+});
 
 void init();
