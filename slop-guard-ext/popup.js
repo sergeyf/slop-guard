@@ -10,6 +10,25 @@ const BAND_COLORS = {
   saturated: '#ef4444',
 };
 
+// Resolve Pyodide index URL from build config (config.js).
+// Falls back to CDN if config.js is not present (dev/unbundled mode).
+function resolvePyodideIndexURL() {
+  if (typeof EXT_CONFIG !== 'undefined' && EXT_CONFIG.PYODIDE_INDEX_URL) {
+    const url = EXT_CONFIG.PYODIDE_INDEX_URL;
+    if (url.startsWith('__EXTENSION_URL__')) {
+      // Running as a real extension — use chrome.runtime.getURL.
+      // Falls back to relative path if chrome.runtime is unavailable
+      // (e.g. when testing via HTTP server).
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
+        return chrome.runtime.getURL(url.replace('__EXTENSION_URL__', ''));
+      }
+      return url.replace('__EXTENSION_URL__', '');
+    }
+    return url;
+  }
+  return 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/';
+}
+
 // DOM refs
 const statusDot    = document.getElementById('statusDot');
 const statusText   = document.getElementById('statusText');
@@ -45,10 +64,9 @@ async function init() {
       return;
     }
 
+    const indexURL = resolvePyodideIndexURL();
     setStatus('loading', 'Loading Pyodide runtime…');
-    pyodide = await loadPyodide({
-      indexURL: 'https://cdn.jsdelivr.net/pyodide/v0.27.7/full/'
-    });
+    pyodide = await loadPyodide({ indexURL });
 
     if (typeof PYTHON_FILES === 'undefined') {
       setStatus('error', 'python_bundle.js not found — run update.sh or update.ps1 first');

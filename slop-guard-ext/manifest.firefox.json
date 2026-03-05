@@ -22,7 +22,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "slop-guard@extension",
+      "id": "slop-guard@eric-tramel.github.io",
       "strict_min_version": "109.0"
     }
   },
