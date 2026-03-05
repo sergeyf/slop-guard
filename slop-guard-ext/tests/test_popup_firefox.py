@@ -33,11 +33,13 @@ class TestFirefoxInit:
 
     def test_version_label_populated(self, page):
         version = page.locator("#versionLabel")
-        expect(version).not_to_have_text("loading…", timeout=PYODIDE_TIMEOUT)
+        expect(version).not_to_have_text("loading...", timeout=PYODIDE_TIMEOUT)
         assert version.text_content().startswith("v")
 
     def test_analyze_button_enabled(self, page):
-        expect(page.locator("#statusText")).to_have_text("Ready", timeout=PYODIDE_TIMEOUT)
+        expect(page.locator("#statusText")).to_have_text(
+            "Ready", timeout=PYODIDE_TIMEOUT
+        )
         expect(page.locator("#analyzeBtn")).to_be_enabled()
 
 
@@ -45,7 +47,9 @@ class TestFirefoxAnalysis:
     """Test core analysis in Firefox."""
 
     def _wait_ready(self, page):
-        expect(page.locator("#statusText")).to_have_text("Ready", timeout=PYODIDE_TIMEOUT)
+        expect(page.locator("#statusText")).to_have_text(
+            "Ready", timeout=PYODIDE_TIMEOUT
+        )
 
     def test_analyze_clean_text(self, page):
         self._wait_ready(page)
@@ -444,7 +448,9 @@ window.chrome = {
 
             # Restored score (77) should be replaced by pending-text analysis score (22).
             expect(page.locator("#scoreNumber")).to_have_text("22")
-            assert page.locator("#inputText").input_value() == "pending context-menu text"
+            assert (
+                page.locator("#inputText").input_value() == "pending context-menu text"
+            )
 
             pending_after = page.evaluate("window.__storage.pendingText")
             assert pending_after is None
@@ -456,5 +462,213 @@ window.chrome = {
                 "window.__messages.filter((m) => m.type === 'SG_ANALYZE').map((m) => m.text)"
             )
             assert analyze_messages == ["pending context-menu text"]
+
+            browser.close()
+
+
+class TestFirefoxErrorHandling:
+    """Regression tests for timeout, validation, and persistence failures."""
+
+    def test_invalid_analysis_result_shows_clear_error(self, firefox_server):
+        with sync_playwright() as pw:
+            browser = pw.firefox.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            page.add_init_script(
+                """
+window.chrome = {
+  runtime: {
+    id: "slop-guard-test",
+    sendMessage: async (msg) => {
+      if (msg.type === "SG_INIT") {
+        return { ok: true, version: "9.9.9" };
+      }
+      if (msg.type === "SG_ANALYZE") {
+        return {
+          ok: true,
+          result: {
+            score: 88,
+            band: "mystery",
+            word_count: 4,
+            total_penalty: 2,
+            density: 0.5
+          }
+        };
+      }
+      return { ok: false, error: "Unknown message" };
+    }
+  },
+  storage: {
+    local: {
+      get: async () => ({}),
+      set: async () => {},
+      remove: async () => {}
+    }
+  }
+};
+                """
+            )
+            page.goto(f"{firefox_server}/popup.html", wait_until="domcontentloaded")
+
+            expect(page.locator("#statusText")).to_have_text("Ready", timeout=10_000)
+            page.fill("#inputText", "Background runtime path test text.")
+            page.click("#analyzeBtn")
+
+            expect(page.locator("#statusText")).to_contain_text(
+                "invalid band", timeout=10_000
+            )
+
+            browser.close()
+
+    def test_analysis_timeout_surfaces_error(self, firefox_server):
+        with sync_playwright() as pw:
+            browser = pw.firefox.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            page.add_init_script(
+                """
+window.chrome = {
+  runtime: {
+    id: "slop-guard-test",
+    sendMessage: async (msg) => {
+      if (msg.type === "SG_INIT") {
+        return { ok: true, version: "9.9.9" };
+      }
+      if (msg.type === "SG_ANALYZE") {
+        return new Promise(() => {});
+      }
+      return { ok: false, error: "Unknown message" };
+    }
+  },
+  storage: {
+    local: {
+      get: async () => ({}),
+      set: async () => {},
+      remove: async () => {}
+    }
+  }
+};
+                """
+            )
+            page.goto(
+                f"{firefox_server}/popup.html?timeoutMs=1000",
+                wait_until="domcontentloaded",
+            )
+
+            expect(page.locator("#statusText")).to_have_text("Ready", timeout=10_000)
+            page.fill("#inputText", "A short timeout test.")
+            page.click("#analyzeBtn")
+
+            expect(
+                page.locator("#statusText"),
+            ).to_have_text("Error: Analysis timed out after 1s.", timeout=10_000)
+
+            browser.close()
+
+    def test_storage_failure_is_visible(self, firefox_server):
+        with sync_playwright() as pw:
+            browser = pw.firefox.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            page.add_init_script(
+                """
+window.chrome = {
+  runtime: {
+    id: "slop-guard-test",
+    sendMessage: async (msg) => {
+      if (msg.type === "SG_INIT") {
+        return { ok: true, version: "9.9.9" };
+      }
+      if (msg.type === "SG_ANALYZE") {
+        return {
+          ok: true,
+          result: {
+            score: 88,
+            band: "clean",
+            word_count: 4,
+            total_penalty: 2,
+            density: 0.5,
+            advice: ["stub advice"],
+            counts: { sentence_level: 1 },
+            violations: []
+          }
+        };
+      }
+      return { ok: false, error: "Unknown message" };
+    }
+  },
+  storage: {
+    local: {
+      get: async () => ({}),
+      set: async () => { throw new Error("Quota exceeded"); },
+      remove: async () => {}
+    }
+  }
+};
+                """
+            )
+            page.goto(f"{firefox_server}/popup.html", wait_until="domcontentloaded")
+
+            expect(page.locator("#statusText")).to_have_text("Ready", timeout=10_000)
+            page.fill("#inputText", "A storage failure test.")
+            page.click("#analyzeBtn")
+
+            expect(page.locator("#statusText")).to_have_text(
+                "Ready - result not saved", timeout=10_000
+            )
+
+            browser.close()
+
+    def test_capture_warning_is_shown_persistently(self, firefox_server):
+        with sync_playwright() as pw:
+            browser = pw.firefox.launch(headless=True)
+            ctx = browser.new_context()
+            page = ctx.new_page()
+            page.add_init_script(
+                """
+window.chrome = {
+  runtime: {
+    id: "slop-guard-test",
+    sendMessage: async (msg) => {
+      if (msg.type === "SG_INIT") {
+        return { ok: true, version: "9.9.9" };
+      }
+      return { ok: false, error: "Unknown message" };
+    }
+  },
+  storage: {
+    local: {
+      get: async () => ({}),
+      set: async () => {},
+      remove: async () => {}
+    }
+  },
+  tabs: {
+    query: async () => [{ id: 7 }]
+  },
+  scripting: {
+    executeScript: async () => [{
+      result: {
+        kind: "page",
+        text: "captured page text",
+        warning: "Clipped to 100,000 characters.",
+        title: "Doc",
+        url: "https://example.com/a"
+      }
+    }]
+  }
+};
+                """
+            )
+            page.goto(f"{firefox_server}/popup.html", wait_until="domcontentloaded")
+
+            expect(page.locator("#statusText")).to_have_text("Ready", timeout=10_000)
+            page.click("#grabPageBtn")
+
+            assert page.locator("#inputText").input_value() == "captured page text"
+            expect(page.locator("#captureNotice")).to_have_class(re.compile("visible"))
+            expect(page.locator("#captureNotice")).to_have_text(
+                "Clipped to 100,000 characters."
+            )
 
             browser.close()

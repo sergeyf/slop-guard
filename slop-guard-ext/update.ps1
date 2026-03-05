@@ -1,4 +1,4 @@
-# Pull latest slop-guard and regenerate the bundle.
+# Pull the latest slop-guard source and regenerate the browser bundle.
 # Usage: .\update.ps1 [-Repo <path>]
 
 param(
@@ -18,18 +18,10 @@ if (-not $Repo) {
     }
 }
 
-python "$PSScriptRoot\bundle.py" $Repo
+uv run "$PSScriptRoot\bundle.py" $Repo
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "bundle.py failed. Is Python 3 installed and on PATH?"
+    Write-Error "bundle.py failed. Is uv installed and on PATH?"
     exit 1
-}
-
-$manifestPath = Join-Path $PSScriptRoot "manifest.json"
-if (-not (Test-Path $manifestPath)) {
-    Write-Host ""
-    Write-Host "WARNING: No manifest.json found. First-time setup:" -ForegroundColor Yellow
-    Write-Host "  Chrome:  Copy-Item manifest.chrome.json manifest.json"
-    Write-Host "  Firefox: Copy-Item manifest.firefox.json manifest.json"
 }
 
 Write-Host ""

@@ -21,12 +21,10 @@ DIST_DIR = EXT_DIR / "dist"
 
 
 def _ensure_build() -> None:
-    """Run build.py if dist/firefox is missing."""
-    firefox_dir = DIST_DIR / "firefox"
-    if not firefox_dir.exists():
-        subprocess.check_call(
-            [sys.executable, str(EXT_DIR / "build.py"), "--no-zip"],
-        )
+    """Run build.py so tests always use a fresh browser bundle."""
+    subprocess.check_call(
+        [sys.executable, str(EXT_DIR / "build.py"), "--no-zip"],
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -56,9 +54,11 @@ def extension_server():
     handler = type(
         "Handler",
         (_QuietHandler,),
-        {"__init__": lambda self, *a, **kw: _QuietHandler.__init__(
-            self, *a, directory=directory, **kw
-        )},
+        {
+            "__init__": lambda self, *a, **kw: _QuietHandler.__init__(
+                self, *a, directory=directory, **kw
+            )
+        },
     )
     server = http.server.HTTPServer(("127.0.0.1", 0), handler)
     port = server.server_address[1]
