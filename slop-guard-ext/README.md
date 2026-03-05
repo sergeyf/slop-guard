@@ -40,6 +40,9 @@ python3 build.py --target firefox   # Firefox only (bundles Pyodide locally)
 - Press **Analyze** (or Ctrl+Enter / Cmd+Enter)
 - First Chrome launch downloads Pyodide (~10 MB), cached after that
 - Firefox build includes Pyodide locally — no downloads needed
+- Runtime now lives in extension background context, so reopening the popup reuses an already-initialized Pyodide instance
+- Last analysis report is restored when reopening the popup
+- Capture buttons use smart fallback order (selection → focused editor → page text)
 
 ## Updating slop-guard
 
@@ -65,12 +68,12 @@ python -m pytest tests/ -v
 ## Architecture
 
 ```
-User Input → popup.js → Pyodide (Python WASM) → slop_guard.analyze(text) → JSON → UI
+User Input → popup.js → background.js runtime bridge → Pyodide (Python WASM) → slop_guard.analyze(text) → JSON → UI
 ```
 
 - `bundle.py` reads all Python source from slop-guard, embeds them as JSON in `python_bundle.js`, and downloads `pyodide.js` locally
 - `build.py` produces browser-specific builds in `dist/chrome/` and `dist/firefox/`
-- The popup loads Pyodide and runs the exact same Python code as the CLI/MCP server
+- Background runtime loads Pyodide once and serves popup analysis requests over extension messaging
 - Firefox build bundles Pyodide runtime locally (AMO requires no remote code)
 - Chrome build uses the jsDelivr CDN for Pyodide (cached after first load)
 - No `mcp` dependency needed; the bundle replaces `server.py` with a thin `analyze()` wrapper

@@ -2,7 +2,6 @@
 python_bundle.js
 pyodide.js
 .pyodide-version
-config.js
 manifest.json
 
 # Build output
