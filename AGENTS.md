@@ -37,3 +37,8 @@ Create a commit and push a PR with a full description that fills out the followi
 * Optimized for time-efficient computation, even at the cost of legibility.
 * Favor composition over monoliths.
 
+## Writing and Documentation
+
+* Always run slop-guard MCP tools (or use `sg` CLI) to ensure your documentation is high-quality.
+* This rule applies to: README, any docs/, PRs, issues, etc. Any human-facing writing.
+
