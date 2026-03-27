@@ -9,7 +9,6 @@ from mcp.server.fastmcp import FastMCP
 from .analysis import (
     AnalysisDocument,
     AnalysisPayload,
-    FileAnalysisPayload,
     HYPERPARAMETERS,
     Hyperparameters,
     band_for_score,
@@ -78,7 +77,6 @@ def _analyze(
         "advice": deduplicate_advice(list(state.advice)),
     }
 
-
 @mcp_server.tool()
 def check_slop(text: str) -> AnalysisPayload:
     """Analyze text for AI slop patterns.
@@ -115,7 +113,7 @@ def _read_analysis_file(file_path: str) -> str:
 
 
 @mcp_server.tool()
-def check_slop_file(file_path: str) -> FileAnalysisPayload:
+def check_slop_file(file_path: str) -> AnalysisPayload:
     """Analyze a file for AI slop patterns.
 
     Reads the file at the given path and runs the same analysis as check_slop.
@@ -124,8 +122,7 @@ def check_slop_file(file_path: str) -> FileAnalysisPayload:
     each issue found.
     """
     text = _read_analysis_file(file_path)
-    result = _analyze(text, HYPERPARAMETERS)
-    return {**result, "file": file_path}
+    return _analyze(text, HYPERPARAMETERS)
 
 
 def _build_parser() -> argparse.ArgumentParser:
