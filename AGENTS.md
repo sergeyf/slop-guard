@@ -14,23 +14,39 @@ uv run --with dependency ...
 ```
 
 ### Git Workflow
-When asked for a new feature, bug fix, or other code-specific work, check out a new branch on a new git worktree.
-Use `gh` for interactions with GitHub.
-Create a commit and push a PR with a full description that fills out the following sections.
 
+* When asked for a new feature, bug fix, or other code-specific work, check out a new branch on a new git worktree.
+Use `gh` for interactions with GitHub.
+* Create a commit and push a PR with a full description that fills out the following sections.
 ```
 ## Description
 
+[... a paragraph decription of what the PR is ...]
+
 ## Why?
+
+[... a paragraph about why this PR needed to exist ...]
 
 ## Usage / Demonstration
 
-## Test Plan
+[... can be as long as necessary, should include code blocks ...]
+
+## Verification
+
+[ ... what was done to verify the PR ... ]
+
+## Issues
+
+[ ... list of Issue items related or that are closed by the PR ... ] 
+
 ```
+* The PR title should be a simple sentence describing what it is.
+* Don't mark PRs as draft when creating them.
+* Don't include any AI agent authorship claims (e.g. "[codex]..." or "Authored by: ..." etc.)
 
 ### Python Style
 
-* Google style docstrings for modules, classes, and functions.
+* Full Google style docstrings for modules, classes, and functions.
 * Strong types in 3.11+ python conventions.
 * Use TypeAlias to define compositions of types.
 * Loud errors, no "defensive" coding.
