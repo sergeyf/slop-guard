@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling>=1.27.0"]
+requires = ["hatch-vcs>=0.4.0", "hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "slop-guard"
-version = "0.3.1"
+dynamic = ["version"]
 description = "Rule-based prose linter for formulaic AI writing patterns."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,6 +36,12 @@ slop-guard = "slop_guard:main"
 sg = "slop_guard.cli:main"
 sg-fit = "slop_guard.fit_cli:main"
 
+[dependency-groups]
+dev = [
+  "pytest>=8.4.0",
+  "pytest-cov>=7.0.0",
+]
+
 [tool.hatch.build]
 exclude = [
   "benchmark",
@@ -66,3 +72,23 @@ exclude = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/slop_guard"]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = [
+  "-ra",
+  "--strict-config",
+  "--strict-markers",
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["slop_guard"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

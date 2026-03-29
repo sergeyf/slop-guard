@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "slop-guard-dev": {
+      "command": "uv",
+      "args": ["run", "--directory", "/Users/eric/src/slop-guard", "slop-guard"]
+    }
+  }
+}

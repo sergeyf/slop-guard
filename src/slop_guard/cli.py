@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Literal, TextIO, TypeAlias
 
 from .rules import Pipeline
+from .analysis import SourceAnalysisPayload
 from .server import HYPERPARAMETERS, Hyperparameters, _analyze
 from .version import PACKAGE_VERSION
 
@@ -63,6 +64,7 @@ _BAND_SYMBOLS: dict[str, str] = {
 }
 
 InputValue: TypeAlias = str | Path
+ConfigLoadError: TypeAlias = OSError | UnicodeDecodeError
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,11 @@ class InputTarget:
 
     kind: Literal["file", "stdin", "text"]
     value: InputValue
-    label: str
+    display_label: str
+
+
+class InputResolutionError(ValueError):
+    """Raised when a CLI positional input cannot be resolved."""
 
 
 def _format_score_line(
@@ -117,13 +123,13 @@ def _print_advice(result: dict, file: TextIO = sys.stdout) -> None:
 
 def _analyze_text(
     text: str,
-    label: str,
+    source: str,
     hyperparameters: Hyperparameters,
     pipeline: Pipeline,
-) -> dict:
+) -> SourceAnalysisPayload:
     """Run analysis and attach the source label."""
     result = _analyze(text, hyperparameters, pipeline=pipeline)
-    result["source"] = label
+    result["source"] = source
     return result
 
 
@@ -131,7 +137,7 @@ def _analyze_file(
     path: Path,
     hyperparameters: Hyperparameters,
     pipeline: Pipeline,
-) -> dict:
+) -> SourceAnalysisPayload:
     """Read a file and analyze its contents."""
     text = path.read_text(encoding="utf-8")
     return _analyze_text(text, str(path), hyperparameters, pipeline)
@@ -217,27 +223,112 @@ def _is_inline_text_argument(value: str) -> bool:
     return any(ch.isspace() for ch in value)
 
 
+def _path_points_to_existing_file(path: Path) -> bool:
+    """Return whether ``path`` exists as a regular file.
+
+    Args:
+        path: Candidate filesystem path supplied on the CLI.
+
+    Returns:
+        ``True`` when the path can be stat'ed and resolves to a regular file.
+        ``False`` when the path does not exist or the OS rejects the stat call,
+        such as ``ENAMETOOLONG`` for long inline prose strings.
+    """
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _resolve_inputs(args: argparse.Namespace) -> list[InputTarget]:
-    """Resolve positional args into typed input targets."""
+    """Resolve positional args into typed input targets.
+
+    Raises:
+        InputResolutionError: If any positional input is an empty string.
+    """
     inputs: list[InputTarget] = []
     for index, raw in enumerate(args.inputs, start=1):
+        if raw == "":
+            raise InputResolutionError(
+                f"input {index} is empty; pass non-empty inline text, a file path, or '-' for stdin"
+            )
         if raw == "-":
-            inputs.append(InputTarget(kind="stdin", value=raw, label="<stdin>"))
+            inputs.append(InputTarget(kind="stdin", value=raw, display_label="<stdin>"))
             continue
         candidate_path = Path(raw)
-        if candidate_path.is_file():
+        if _path_points_to_existing_file(candidate_path):
             inputs.append(
-                InputTarget(kind="file", value=candidate_path, label=str(candidate_path))
+                InputTarget(
+                    kind="file",
+                    value=candidate_path,
+                    display_label=str(candidate_path),
+                )
             )
             continue
         if _is_inline_text_argument(raw):
-            inputs.append(InputTarget(kind="text", value=raw, label=f"<text:{index}>"))
+            inputs.append(
+                InputTarget(kind="text", value=raw, display_label=f"<text:{index}>")
+            )
             continue
-        inputs.append(InputTarget(kind="file", value=candidate_path, label=str(candidate_path)))
+        inputs.append(
+            InputTarget(
+                kind="file",
+                value=candidate_path,
+                display_label=str(candidate_path),
+            )
+        )
     return inputs
 
 
-def _emit_result(result: dict, args: argparse.Namespace) -> None:
+def _format_config_load_error(path: Path, exc: ConfigLoadError) -> str:
+    """Render a stable user-facing config load error.
+
+    Args:
+        path: Config path passed to ``--config``.
+        exc: Read-time error raised while resolving or opening the config.
+
+    Returns:
+        Stable ``<path>: <detail>`` text for CLI stderr output.
+    """
+    if isinstance(exc, FileNotFoundError):
+        detail = "No such file"
+    elif isinstance(exc, IsADirectoryError):
+        detail = "Is a directory"
+    elif isinstance(exc, UnicodeDecodeError):
+        detail = "Invalid UTF-8"
+    else:
+        detail = exc.strerror or str(exc)
+    return f"{path}: {detail}"
+
+
+def _load_pipeline(config_path: str | None) -> Pipeline:
+    """Load the CLI rule pipeline with user-facing config path errors.
+
+    Args:
+        config_path: Optional JSONL rule configuration path from ``--config``.
+
+    Returns:
+        Loaded rule pipeline.
+
+    Raises:
+        TypeError: The JSONL config schema is invalid.
+        ValueError: The config path or JSONL payload is invalid.
+    """
+    if config_path is None:
+        return Pipeline.from_jsonl()
+
+    path = Path(config_path)
+    try:
+        return Pipeline.from_jsonl(str(path))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(_format_config_load_error(path, exc)) from exc
+
+
+def _emit_result(
+    display_label: str,
+    result: SourceAnalysisPayload,
+    args: argparse.Namespace,
+) -> None:
     """Print one analyzed result immediately."""
     fails_threshold = args.threshold > 0 and result["score"] < args.threshold
     if args.quiet and not fails_threshold:
@@ -247,7 +338,7 @@ def _emit_result(result: dict, args: argparse.Namespace) -> None:
         return
 
     print(
-        _format_score_line(result["source"], result, show_counts=args.counts),
+        _format_score_line(display_label, result, show_counts=args.counts),
         flush=True,
     )
     if args.verbose:
@@ -269,20 +360,28 @@ def cli_main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    inputs = _resolve_inputs(args)
+    try:
+        inputs = _resolve_inputs(args)
+    except InputResolutionError as exc:
+        print(f"sg: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
-    results: list[dict] = []
+    results: list[SourceAnalysisPayload] = []
     threshold_failed = False
     hp = HYPERPARAMETERS
-    pipeline = Pipeline.from_jsonl(args.config)
+    try:
+        pipeline = _load_pipeline(args.config)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"sg: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
     for target in inputs:
         if target.kind == "stdin":
             text = sys.stdin.read()
-            result = _analyze_text(text, target.label, hp, pipeline)
+            result = _analyze_text(text, text, hp, pipeline)
         elif target.kind == "text":
             assert isinstance(target.value, str)
-            result = _analyze_text(target.value, target.label, hp, pipeline)
+            result = _analyze_text(target.value, target.value, hp, pipeline)
         else:
             assert isinstance(target.value, Path)
             path = target.value
@@ -300,7 +399,7 @@ def cli_main(argv: list[str] | None = None) -> int:
             threshold_failed = True
 
         if not args.json:
-            _emit_result(result, args)
+            _emit_result(target.display_label, result, args)
 
     if not results:
         return EXIT_ERROR

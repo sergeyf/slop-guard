@@ -3,12 +3,47 @@
 
 import math
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TypeAlias
+from typing import Literal, TypeAlias, TypedDict
+
+from .markdown import MarkdownCodeView
 
 Counts: TypeAlias = dict[str, int]
-ViolationPayload: TypeAlias = dict[str, object]
+BandLabel: TypeAlias = Literal["clean", "light", "moderate", "heavy", "saturated"]
+
+
+class ViolationPayload(TypedDict):
+    """Structured violation payload returned to CLI and MCP consumers."""
+
+    type: Literal["Violation"]
+    rule: str
+    match: str
+    context: str
+    penalty: int
+    start: int
+    end: int
+
+
+class AnalysisPayload(TypedDict):
+    """Structured analyzer result produced by the core analyzer."""
+
+    score: int
+    band: BandLabel
+    word_count: int
+    violations: list[ViolationPayload]
+    counts: Counts
+    total_penalty: int
+    weighted_sum: float
+    density: float
+    advice: list[str]
+
+
+class SourceAnalysisPayload(AnalysisPayload):
+    """Structured analyzer result augmented with a source label."""
+
+    source: str
 
 
 @dataclass(frozen=True)
@@ -94,8 +129,16 @@ class Violation:
     match: str
     context: str
     penalty: int
+    start: int | None = None
+    end: int | None = None
 
-    def to_payload(self) -> ViolationPayload:
+    def explicit_span(self) -> tuple[int, int] | None:
+        """Return the exact rule-provided span when one exists."""
+        if self.start is None or self.end is None:
+            return None
+        return (self.start, self.end)
+
+    def to_payload(self, start: int, end: int) -> ViolationPayload:
         """Serialize a typed violation for tool output."""
         return {
             "type": "Violation",
@@ -103,15 +146,69 @@ class Violation:
             "match": self.match,
             "context": self.context,
             "penalty": self.penalty,
+            "start": start,
+            "end": end,
         }
 
 
 _SENTENCE_SPLIT_RE = re.compile(r"[.!?][\"'\u201D\u2019)\]]*(?:\s|$)")
 _BULLET_LINE_RE = re.compile(r"^\s*[-*]\s|^\s*\d+[.)]\s")
 _BOLD_TERM_BULLET_LINE_RE = re.compile(r"^\s*[-*]\s+\*\*|^\s*\d+[.)]\s+\*\*")
-_FENCED_CODE_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
+_MARKDOWN_TABLE_DELIMITER_CELL_RE = re.compile(r"^\s*:?-{3,}:?\s*$")
 _WORD_TOKEN_RE = re.compile(r"\w+")
 _EDGE_WORD_STRIP_RE = re.compile(r"^[^\w]+|[^\w]+$")
+
+
+def _split_sentences(text: str) -> tuple[str, ...]:
+    """Return trimmed sentence-like spans from ``text``."""
+    return tuple(s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip())
+
+
+def _looks_like_markdown_table_row(line: str) -> bool:
+    """Return whether ``line`` looks like a standard pipe-table row."""
+    stripped = line.strip()
+    if "|" not in stripped:
+        return False
+
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    return len(cells) >= 2 and any(cell for cell in cells)
+
+
+def _is_markdown_table_delimiter(line: str) -> bool:
+    """Return whether ``line`` is a Markdown pipe-table delimiter row."""
+    stripped = line.strip()
+    if "|" not in stripped:
+        return False
+
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    return len(cells) >= 2 and all(
+        _MARKDOWN_TABLE_DELIMITER_CELL_RE.match(cell) is not None for cell in cells
+    )
+
+
+def _replace_markdown_tables_with_sentence_breaks(text: str) -> str:
+    """Replace standard pipe tables with sentence separators."""
+    lines = text.split("\n")
+    normalized_lines: list[str] = []
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        if (
+            index + 1 < len(lines)
+            and _looks_like_markdown_table_row(line)
+            and _is_markdown_table_delimiter(lines[index + 1])
+        ):
+            normalized_lines.append(".")
+            index += 2
+            while index < len(lines) and _looks_like_markdown_table_row(lines[index]):
+                index += 1
+            continue
+
+        normalized_lines.append(line)
+        index += 1
+
+    return "\n".join(normalized_lines)
 
 
 @dataclass(frozen=True)
@@ -122,23 +219,43 @@ class AnalysisDocument:
     lines: tuple[str, ...]
     sentences: tuple[str, ...]
     word_count: int
+    markdown_code_view: MarkdownCodeView
 
     @classmethod
     def from_text(cls, text: str) -> "AnalysisDocument":
         """Build a document with line/sentence/word projections."""
+        markdown_code_view = MarkdownCodeView.from_text(text)
         return cls(
             text=text,
             lines=tuple(text.split("\n")),
-            sentences=tuple(
-                s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()
-            ),
-            word_count=word_count(text),
+            sentences=_split_sentences(text),
+            word_count=word_count(markdown_code_view.masked_text),
+            markdown_code_view=markdown_code_view,
         )
 
     @cached_property
     def sentence_word_counts(self) -> tuple[int, ...]:
         """Return cached word counts aligned with ``sentences``."""
         return tuple(len(sentence.split()) for sentence in self.sentences)
+
+    @cached_property
+    def sentence_analysis_text(self) -> str:
+        """Return sentence-analysis text with Markdown blocks replaced."""
+        return _replace_markdown_tables_with_sentence_breaks(
+            self.markdown_code_view.fenced_text_for_sentence_breaks
+        )
+
+    @cached_property
+    def sentence_analysis_sentences(self) -> tuple[str, ...]:
+        """Return markdown-sanitized sentences used by sentence-length rules."""
+        return _split_sentences(self.sentence_analysis_text)
+
+    @cached_property
+    def sentence_analysis_word_counts(self) -> tuple[int, ...]:
+        """Return word counts aligned with ``sentence_analysis_sentences``."""
+        return tuple(
+            len(sentence.split()) for sentence in self.sentence_analysis_sentences
+        )
 
     @cached_property
     def lower_text(self) -> str:
@@ -210,12 +327,32 @@ class AnalysisDocument:
     @cached_property
     def text_without_code_blocks(self) -> str:
         """Return cached text with fenced code blocks removed."""
-        return _FENCED_CODE_BLOCK_RE.sub("", self.text)
+        return self.markdown_code_view.text_without_fenced_code
 
     @cached_property
     def word_count_without_code_blocks(self) -> int:
         """Return cached word count of ``text_without_code_blocks``."""
         return word_count(self.text_without_code_blocks)
+
+    @cached_property
+    def text_with_markdown_code_masked(self) -> str:
+        """Return cached text with Markdown code replaced by whitespace."""
+        return self.markdown_code_view.masked_text
+
+    @cached_property
+    def lower_text_with_markdown_code_masked(self) -> str:
+        """Return cached lowercase text with Markdown code masked out."""
+        return self.text_with_markdown_code_masked.lower()
+
+    @cached_property
+    def word_tokens_lower_with_markdown_code_masked(self) -> tuple[str, ...]:
+        """Return lowercase tokens from text with Markdown code masked out."""
+        return tuple(_WORD_TOKEN_RE.findall(self.lower_text_with_markdown_code_masked))
+
+    @cached_property
+    def word_token_set_lower_with_markdown_code_masked(self) -> frozenset[str]:
+        """Return cached token set from text with Markdown code masked out."""
+        return frozenset(self.word_tokens_lower_with_markdown_code_masked)
 
 
 @dataclass
@@ -236,9 +373,9 @@ class AnalysisState:
     counts: Counts
 
     @classmethod
-    def initial(cls) -> "AnalysisState":
+    def initial(cls, count_keys: Iterable[str] | None = None) -> "AnalysisState":
         """Construct an empty state with canonical counts initialized to zero."""
-        return cls(violations=(), advice=(), counts=initial_counts())
+        return cls(violations=(), advice=(), counts=initial_counts(count_keys))
 
     def merge(self, result: RuleResult) -> "AnalysisState":
         """Merge one rule result into a new state instance."""
@@ -265,20 +402,26 @@ _COUNT_KEYS: tuple[str, ...] = (
     "rhythm",
     "em_dash",
     "contrast_pairs",
+    "setup_resolution",
     "colon_density",
     "pithy_fragment",
-    "setup_resolution",
     "bullet_density",
     "blockquote_density",
     "bold_bullet_list",
     "horizontal_rules",
     "phrase_reuse",
+    "copula_chain",
+    "extreme_sentence",
+    "closing_aphorism",
+    "paragraph_balance",
+    "paragraph_cv",
 )
 
 
-def initial_counts() -> Counts:
+def initial_counts(count_keys: Iterable[str] | None = None) -> Counts:
     """Create the canonical per-rule counter map used by the analyzer."""
-    return {key: 0 for key in _COUNT_KEYS}
+    keys = _COUNT_KEYS if count_keys is None else tuple(dict.fromkeys(count_keys))
+    return {key: 0 for key in keys}
 
 
 def context_around(
@@ -298,12 +441,124 @@ def context_around(
     return f"{prefix}{snippet}{suffix}"
 
 
+def _literal_span_candidates(text: str, match: str) -> tuple[tuple[int, int], ...]:
+    """Return case-insensitive exact-text match spans for ``match``."""
+    if not match:
+        return ()
+    return tuple(
+        (occurrence.start(), occurrence.end())
+        for occurrence in re.finditer(re.escape(match), text, flags=re.IGNORECASE)
+    )
+
+
+def _context_core(context: str) -> str:
+    """Return the searchable body of a context snippet without ellipses."""
+    start = 3 if context.startswith("...") else 0
+    end = len(context) - 3 if context.endswith("...") else len(context)
+    return context[start:end]
+
+
+def _context_span_candidates(
+    normalized_text: str,
+    context: str,
+) -> tuple[tuple[int, int], ...]:
+    """Return spans where the normalized context snippet occurs in ``text``."""
+    core = _context_core(context)
+    if not core:
+        return ()
+
+    spans: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        index = normalized_text.find(core, start)
+        if index < 0:
+            return tuple(spans)
+        spans.append((index, index + len(core)))
+        start = index + 1
+
+
+def _select_unused_span(
+    candidates: tuple[tuple[int, int], ...],
+    used_spans: set[tuple[int, int]],
+) -> tuple[int, int] | None:
+    """Return the first candidate span not already used, else the first match."""
+    for span in candidates:
+        if span not in used_spans:
+            return span
+    return candidates[0] if candidates else None
+
+
+def _resolve_violation_span(
+    violation: Violation,
+    text: str,
+    normalized_text: str,
+    context_window_chars: int,
+    used_spans: set[tuple[int, int]],
+) -> tuple[int, int]:
+    """Resolve a best-effort character span for a violation payload."""
+    explicit_span = violation.explicit_span()
+    if explicit_span is not None:
+        return explicit_span
+
+    literal_candidates = _literal_span_candidates(text, violation.match)
+    context_matched_literal_candidates = tuple(
+        span
+        for span in literal_candidates
+        if context_around(text, span[0], span[1], context_window_chars) == violation.context
+    )
+    literal_span = _select_unused_span(context_matched_literal_candidates, used_spans)
+    if literal_span is not None:
+        return literal_span
+
+    if violation.match.casefold() in violation.context.casefold():
+        literal_span = _select_unused_span(literal_candidates, used_spans)
+        if literal_span is not None:
+            return literal_span
+
+    context_span = _select_unused_span(
+        _context_span_candidates(normalized_text, violation.context),
+        used_spans,
+    )
+    if context_span is not None:
+        return context_span
+
+    return (0, len(text))
+
+
+def serialize_violations(
+    violations: Iterable[Violation],
+    text: str,
+    context_window_chars: int,
+) -> list[ViolationPayload]:
+    """Serialize violations and attach resolved character offsets."""
+    normalized_text = text.replace("\n", " ")
+    used_spans: set[tuple[int, int]] = set()
+    payloads: list[ViolationPayload] = []
+
+    for violation in violations:
+        start, end = _resolve_violation_span(
+            violation,
+            text,
+            normalized_text,
+            context_window_chars,
+            used_spans,
+        )
+        used_spans.add((start, end))
+        payloads.append(violation.to_payload(start, end))
+
+    return payloads
+
+
 def word_count(text: str) -> int:
     """Return the whitespace-delimited word count for a text blob."""
     return len(text.split())
 
 
-def short_text_result(word_count_value: int, counts: Counts, hp: Hyperparameters) -> dict:
+def short_text_result(
+    word_count_value: int,
+    counts: Counts,
+    hp: Hyperparameters,
+) -> AnalysisPayload:
     """Build the fixed response shape for short texts that are skipped."""
     return {
         "score": hp.score_max,

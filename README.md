@@ -1,10 +1,15 @@
 # slop-guard
 
+[![Site](https://img.shields.io/badge/site-GitHub%20Pages-0f706f?style=flat-square)](https://eric-tramel.github.io/slop-guard/)
+
 A rule-based prose linter that scores text 0--100 for formulaic AI writing patterns. No LLM judge, no API calls. Purely programmatic.
 
-It runs ~80 compiled patterns against your text and returns a numeric score, a list of specific violations with surrounding context, and concrete advice for each hit.
+The default pipeline loads 23 configurable rules backed by 200+ literal and structural heuristics. It returns a numeric score, a band label, specific violations with surrounding context, and concrete advice for each hit.
 
 ## Add to Your Agent
+
+Both clients use the same MCP command: `uvx slop-guard`.
+If you want a custom rule JSONL, append `-c /path/to/config.jsonl`.
 
 ### Claude Code
 
@@ -12,8 +17,6 @@ Add from the command line:
 
 ```bash
 claude mcp add slop-guard -- uvx slop-guard
-# Optional custom rule config:
-claude mcp add slop-guard -- uvx slop-guard -c /path/to/config.jsonl
 ```
 
 Add to your `.mcp.json`:
@@ -29,27 +32,12 @@ Add to your `.mcp.json`:
 }
 ```
 
-With a custom rule config:
-
-```json
-{
-  "mcpServers": {
-    "slop-guard": {
-      "command": "uvx",
-      "args": ["slop-guard", "-c", "/path/to/config.jsonl"]
-    }
-  }
-}
-```
-
 ### Codex
 
 Add from the command line:
 
 ```bash
 codex mcp add slop-guard -- uvx slop-guard
-# Optional custom rule config:
-codex mcp add slop-guard -- uvx slop-guard -c /path/to/config.jsonl
 ```
 
 Add to your `~/.codex/config.toml`:
@@ -60,19 +48,11 @@ command = "uvx"
 args = ["slop-guard"]
 ```
 
-With a custom rule config:
-
-```toml
-[mcp_servers.slop-guard]
-command = "uvx"
-args = ["slop-guard", "-c", "/path/to/config.jsonl"]
-```
-
 If you want a fixed release, pin it in `args`, for example: `["slop-guard==0.3.1"]`.
 
 ## CLI
 
-The `sg` command lints prose files from the terminal. No API keys, no network calls.
+The `sg` command lints prose from the terminal. No API keys, no network calls.
 
 ### Quick start
 
@@ -95,7 +75,7 @@ sg [OPTIONS] INPUT [INPUT ...]
 
 ```bash
 sg "This is some test text"
-echo "This is a crucial paradigm shift." | sg -
+echo "Latency dropped from 180 ms to 95 ms." | sg -
 ```
 
 Lint multiple files at once (shell-level glob expansion):
@@ -109,7 +89,7 @@ sg path/**/*.md
 
 | Flag | Description |
 |------|-------------|
-| `-j`, `--json` | Output results as JSON |
+| `-j`, `--json` | Output results as JSON, including `source` as the raw inline/stdin text or full file path |
 | `-v`, `--verbose` | Show individual violations and advice |
 | `-q`, `--quiet` | Only print sources that fail the threshold |
 | `-t SCORE`, `--threshold SCORE` | Minimum passing score (0-100). Exit 1 if any file scores below this |
@@ -135,6 +115,10 @@ sg -v draft.md
 
 # JSON for scripting
 sg -j report.md | jq '.score'
+
+# JSON preserves the true CLI input identity
+sg -j "The migration finished in 12 seconds." | jq '.source'
+# => "The migration finished in 12 seconds."
 
 # CI gate: fail if any file scores below 60
 sg -t 60 docs/*.md
@@ -172,10 +156,10 @@ sg-fit --output rules.fitted.jsonl **/*.txt **/*.md
 
 Optional arguments:
 
-- `--init JSONL` -- Start from a specific rule config JSONL instead of packaged defaults.
-- `--negative-dataset INPUT [INPUT ...]` -- Add negative dataset inputs. This flag can be repeated; all negative rows are normalized to label `0`.
-- `--no-calibration` -- Skip post-fit contrastive penalty calibration for faster fitting on large corpora.
-- `--output JSONL` -- Required when you pass more than one training input.
+- `--init JSONL`: Start from a specific rule config JSONL instead of packaged defaults.
+- `--negative-dataset INPUT [INPUT ...]`: Add negative dataset inputs. This flag can be repeated; all negative rows are normalized to label `0`.
+- `--no-calibration`: Skip post-fit contrastive penalty calibration for faster fitting on large corpora.
+- `--output JSONL`: Required when you pass more than one training input.
 
 Target corpus rows can be either:
 
@@ -191,7 +175,7 @@ or:
 
 If `label` is omitted in the target corpus, `sg-fit` treats it as `1` (positive/target style).
 
-In addition to `.jsonl`, `sg-fit` accepts `.txt` and `.md` files and normalizes each file into a single training sample behind the scenes.
+`sg-fit` also accepts `.txt` and `.md` files. Each file is normalized into a single training sample.
 
 ## Installation
 
@@ -205,7 +189,7 @@ uvx slop-guard
 uvx slop-guard -c /path/to/config.jsonl
 ```
 
-Install persistently (gives you both `slop-guard` MCP server and `sg` CLI):
+Install persistently (gives you `slop-guard`, `sg`, and `sg-fit`):
 
 ```bash
 uv tool install slop-guard
@@ -236,15 +220,19 @@ uv run sg-fit data.jsonl rules.fitted.jsonl
 
 ## MCP Tools
 
-`check_slop(text)` -- Analyze a string. Returns JSON.
+`check_slop(text)`: Analyze a string. Returns JSON diagnostics only; it does not repeat the input text.
 
-`check_slop_file(file_path)` -- Read a file from disk and analyze it. Same output, plus a `file` field.
+`check_slop_file(file_path)`: Read a file from disk and analyze it. Same output, without repeating the file path in the payload.
 
 ## What it catches
 
-The linter checks for overused vocabulary (adjectives, verbs, nouns, hedging adverbs), stock phrases and filler, structural patterns (bold-header-explanation blocks, long bullet runs, triadic lists, bold-term bullet runs, bullet-heavy formatting), tone markers (meta-communication, false narrativity, sentence-opener tells, weasel phrases, AI self-disclosure), rhythm monotony (uniform sentence length), em dash and elaboration colon density, contrast pairs, setup-resolution patterns, and repeated multi-word phrases (4-8 word n-grams appearing 3+ times).
+The default rules cover stock hype words and boilerplate phrases, assistant tone markers, unattributed weasel phrasing, AI self-disclosure, placeholder text, bullet/blockquote/horizontal-rule-heavy Markdown structures, sentence and paragraph rhythm, and em dash or colon overuse.
 
-Scoring uses exponential decay: `score = 100 * exp(-lambda * density)`, where density is the weighted penalty sum normalized per 1000 words. Claude-specific categories (contrast pairs, setup-resolution, pithy fragments) get a concentration multiplier. Repeated use of the same tic costs more than diverse violations.
+They also flag contrast/setup-resolution tells, pithy fragments, repeated 4-8 word phrases, copula chains, extreme long sentences, aphoristic closers, and uneven paragraph cadence.
+
+Texts under 10 words are skipped and return a clean `100`.
+
+Otherwise scoring uses exponential decay: `score = 100 * exp(-lambda * density)`, where density is the weighted penalty sum normalized per 1000 words. Claude-specific categories (contrast pairs, setup-resolution, pithy fragments) get a concentration multiplier. Repeated use of the same tic costs more than diverse violations.
 
 ## Scoring bands
 
@@ -269,7 +257,7 @@ counts         per-category violation counts
 total_penalty  sum of all penalty values
 weighted_sum   after concentration multiplier
 density        weighted_sum per 1000 words
-advice         array of actionable strings, one per distinct issue
+advice         array of advice strings, one per distinct issue
 ```
 
 `violations[].type` is always `"Violation"` for typed records.
@@ -294,3 +282,8 @@ Example per-rule compute-time curves from `benchmark/compute-time.py` +
 ## License
 
 MIT
+
+## Acknowledgements
+
+- [@secemp9](https://x.com/secemp9) for his original [anti-slop rubric](https://github.com/secemp9/rubrics/blob/main/special_ones/anti_slop_rubric.xml) and inspiration.
+- [@myainotez](https://x.com/myainotez) for their contributions and many helpful conversations about the project.

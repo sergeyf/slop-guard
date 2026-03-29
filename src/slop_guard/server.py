@@ -2,19 +2,20 @@
 
 
 import argparse
-import json
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 from .analysis import (
     AnalysisDocument,
+    AnalysisPayload,
     HYPERPARAMETERS,
     Hyperparameters,
     band_for_score,
     compute_weighted_sum,
     deduplicate_advice,
     initial_counts,
+    serialize_violations,
     score_from_density,
     short_text_result,
 )
@@ -31,18 +32,19 @@ def _analyze(
     text: str,
     hyperparameters: Hyperparameters,
     pipeline: Pipeline | None = None,
-) -> dict:
+) -> AnalysisPayload:
     """Run all configured rules and return score, diagnostics, and advice."""
     document = AnalysisDocument.from_text(text)
+    active_pipeline = ACTIVE_PIPELINE if pipeline is None else pipeline
+    count_keys = getattr(active_pipeline, "count_keys", None)
 
     if document.word_count < hyperparameters.short_text_word_count:
         return short_text_result(
             document.word_count,
-            initial_counts(),
+            initial_counts(count_keys),
             hyperparameters,
         )
 
-    active_pipeline = ACTIVE_PIPELINE if pipeline is None else pipeline
     state = active_pipeline.forward(document)
 
     total_penalty = sum(violation.penalty for violation in state.violations)
@@ -63,7 +65,11 @@ def _analyze(
         "score": score,
         "band": band,
         "word_count": document.word_count,
-        "violations": [violation.to_payload() for violation in state.violations],
+        "violations": serialize_violations(
+            state.violations,
+            document.text,
+            hyperparameters.context_window_chars,
+        ),
         "counts": state.counts,
         "total_penalty": total_penalty,
         "weighted_sum": round(weighted_sum, 2),
@@ -71,38 +77,52 @@ def _analyze(
         "advice": deduplicate_advice(list(state.advice)),
     }
 
-
 @mcp_server.tool()
-def check_slop(text: str) -> str:
+def check_slop(text: str) -> AnalysisPayload:
     """Analyze text for AI slop patterns.
 
     Returns a JSON object with a score (0-100), band label, list of specific
-    violations with context, and actionable advice for each issue found.
+    violations with context and character offsets, and actionable advice for
+    each issue found.
     """
-    result = _analyze(text, HYPERPARAMETERS)
-    return json.dumps(result, indent=2)
+    return _analyze(text, HYPERPARAMETERS)
+
+
+def _read_analysis_file(file_path: str) -> str:
+    """Read an analysis target file and raise MCP-safe path errors."""
+    if not file_path:
+        raise ValueError("File path must not be empty.")
+
+    path = Path(file_path)
+    try:
+        if path.is_dir():
+            raise ValueError(f"Path is a directory, not a file: {file_path}")
+        if not path.is_file():
+            raise ValueError(f"File not found: {file_path}")
+    except ValueError:
+        raise
+    except OSError as exc:
+        detail = exc.strerror or str(exc)
+        raise ValueError(f"Invalid file path: {detail}") from exc
+
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        detail = getattr(exc, "strerror", None) or str(exc)
+        raise ValueError(f"Could not read file: {detail}") from exc
 
 
 @mcp_server.tool()
-def check_slop_file(file_path: str) -> str:
+def check_slop_file(file_path: str) -> AnalysisPayload:
     """Analyze a file for AI slop patterns.
 
     Reads the file at the given path and runs the same analysis as check_slop.
     Returns a JSON object with a score (0-100), band label, list of specific
-    violations with context, and actionable advice for each issue found.
+    violations with context and character offsets, and actionable advice for
+    each issue found.
     """
-    path = Path(file_path)
-    if not path.is_file():
-        return json.dumps({"error": f"File not found: {file_path}"})
-
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 - returning tool-safe error payload
-        return json.dumps({"error": f"Could not read file: {exc}"})
-
-    result = _analyze(text, HYPERPARAMETERS)
-    result["file"] = file_path
-    return json.dumps(result, indent=2)
+    text = _read_analysis_file(file_path)
+    return _analyze(text, HYPERPARAMETERS)
 
 
 def _build_parser() -> argparse.ArgumentParser:
